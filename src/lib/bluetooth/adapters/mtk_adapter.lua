@@ -5,6 +5,7 @@
 --- Handles D-Bus command execution and communication with the MTK Bluetooth stack.
 
 local WmtPower = require("src/lib/bluetooth/wmt_power")
+local Subprocess = require("src/lib/bluetooth/subprocess")
 local ffiutil = require("ffi/util")
 local logger = require("logger")
 
@@ -298,6 +299,8 @@ function MtkAdapter.connectDeviceInBackground(device_path)
 
     -- double_fork=true: child reparented to init, auto-reaped, no zombie collection needed
     local pid = ffiutil.runInSubProcess(function()
+        Subprocess.detachFromStorage()
+
         local result = MtkAdapter.connectDevice(device_path)
         logger.dbg("MtkAdapter: Background connect result:", result)
     end, false, true)
