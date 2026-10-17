@@ -5,6 +5,8 @@ require("spec.helper")
 
 describe("MTKBluetooth", function()
     local MTKBluetooth
+    local KoboBluetooth
+    local WmtPower
     local Device
     local UIManager
     local mock_plugin
@@ -12,8 +14,21 @@ describe("MTKBluetooth", function()
     setup(function()
         Device = require("device")
         UIManager = require("ui/uimanager")
+        KoboBluetooth = require("src/kobo_bluetooth")
+        WmtPower = require("src/lib/bluetooth/wmt_power")
         MTKBluetooth = require("src/lib/bluetooth/implementations/mtk_bluetooth")
     end)
+
+    -- Whether an event with this name was broadcast through UIManager
+    local function wasBroadcast(event_name)
+        for _, call in ipairs(UIManager._broadcast_calls or {}) do
+            local event = call.event or call
+            if event and event.name == event_name then
+                return true
+            end
+        end
+        return false
+    end
 
     before_each(function()
         -- Reset UI manager state
@@ -35,6 +50,9 @@ describe("MTKBluetooth", function()
 
         -- Reset all mocks
         resetAllMocks()
+
+        -- The enable subprocess has not powered the chip unless a test says so
+        require("libs/libkoreader-lfs")._setFileState(WmtPower.POWERED_MARKER, { exists = false })
     end)
 
     describe("isDeviceSupported", function()
@@ -125,8 +143,9 @@ describe("MTKBluetooth", function()
             instance:initWithPlugin(mock_plugin)
             instance:turnBluetoothOn()
 
-            -- Execute scheduled tasks to complete async operations (needs 30+ iterations for polling timeout)
-            UIManager:executeScheduledTasks(35)
+            -- Execute scheduled tasks to complete async operations
+            -- (needs 80+ iterations for the polling timeout with the chip power-on fallback)
+            UIManager:executeScheduledTasks(90)
 
             -- preventStandby is called initially, then allowStandby is called when BT fails
             assert.are.equal(1, UIManager._prevent_standby_calls)
@@ -140,6 +159,7 @@ describe("MTKBluetooth", function()
             setMockExecuteResult(0)
             setMockPopenOutput("variant boolean false")
             clearExecutedCommands()
+            require("ui/network/manager"):_setWifiState(true)
             local instance = MTKBluetooth:new()
             instance:initWithPlugin(mock_plugin)
             instance:turnBluetoothOn()
@@ -169,9 +189,10 @@ describe("MTKBluetooth", function()
             assert.are.equal(1, #UIManager._show_calls)
         end)
 
-        it("should turn on WiFi before enabling Bluetooth when WiFi is off", function()
+        it("should enable Bluetooth with no WiFi handling when WiFi is off and On() works", function()
             setMockExecuteResult(0)
             setMockPopenOutput("variant boolean false")
+            clearExecutedCommands()
             local NetworkMgr = require("ui/network/manager")
             NetworkMgr:_reset()
             NetworkMgr:_setWifiState(false)
@@ -180,16 +201,130 @@ describe("MTKBluetooth", function()
             instance:initWithPlugin(mock_plugin)
             instance:turnBluetoothOn()
 
-            -- Should have called turnOnWifi
-            assert.are.equal(1, #NetworkMgr._turn_on_wifi_calls)
-            assert.are.equal(false, NetworkMgr._turn_on_wifi_calls[1].long_press)
-            -- WiFi should now be on
-            assert.is_true(NetworkMgr:isWifiOn())
+            -- The plugin holds Wi-Fi until the adapter is up (it may still need the fallback)
+            assert.is_true(KoboBluetooth.wifi_borrowed)
+
+            UIManager:executeScheduledTasks()
+
+            local commands = getExecutedCommands()
+            -- clear marker, On(), Powered=true: no handshake, no power-off
+            assert.are.equal(3, #commands)
+            assert.are.equal(WmtPower.COMMAND_CLEAR_POWERED, commands[1])
+            assert.is_not_nil(commands[2]:find("BluedroidManager1.On", 1, true))
+            assert.is_not_nil(commands[3]:find("Powered variant:boolean:true", 1, true))
+
+            -- Never through NetworkMgr: no restore script, no turnOffWifi
+            assert.are.equal(0, #NetworkMgr._turn_on_wifi_calls)
+            assert.are.equal(0, #NetworkMgr._turn_off_wifi_calls)
+            assert.is_false(KoboBluetooth.wifi_borrowed)
+            assert.is_true(wasBroadcast("BluetoothWifiReleased"))
         end)
 
-        it("should not turn on WiFi if already on", function()
+        it("should load the radio driver and run the handshake before On() on a cold boot", function()
             setMockExecuteResult(0)
             setMockPopenOutput("variant boolean false")
+            clearExecutedCommands()
+            local NetworkMgr = require("ui/network/manager")
+            NetworkMgr:_reset()
+            NetworkMgr:_setWifiState(false)
+            local lfs = require("libs/libkoreader-lfs")
+            -- Nothing has used the radio since boot: no Bluetooth device node, no ready marker
+            lfs._setFileState(WmtPower.BT_DEVICE, { exists = false })
+            lfs._setFileState(WmtPower.STACK_READY_MARKER, { exists = false })
+
+            local instance = MTKBluetooth:new()
+            instance:initWithPlugin(mock_plugin)
+            instance:turnBluetoothOn()
+
+            assert.is_true(KoboBluetooth.wifi_borrowed)
+
+            -- Nothing may touch D-Bus during the bring-up, even though the node appears early
+            assert.is_true(WmtPower.bringing_up)
+            lfs._setFileState(WmtPower.BT_DEVICE, { exists = true, attributes = { mode = "char device" } })
+            assert.is_false(WmtPower.isStackLoaded())
+
+            -- The subprocess loads the stack, runs the handshake (marker) and marks the stack ready
+            lfs._setFileState(WmtPower.POWERED_MARKER, { exists = true, attributes = { mode = "file" } })
+            lfs._setFileState(WmtPower.STACK_READY_MARKER, { exists = true, attributes = { mode = "file" } })
+            UIManager:executeScheduledTasks()
+
+            local commands = getExecutedCommands()
+            assert.are.equal(WmtPower.COMMAND_CLEAR_POWERED, commands[1])
+            assert.is_not_nil(commands[2]:find(WmtPower.WMT_LOADER, 1, true))
+            assert.are.equal(WmtPower.COMMAND_MARK_POWERED, commands[3])
+            assert.are.equal(WmtPower.COMMAND_POWER_ON, commands[4])
+            assert.are.equal(WmtPower.COMMAND_MARK_STACK_READY, commands[5])
+            assert.is_not_nil(commands[6]:find("BluedroidManager1.On", 1, true))
+            assert.is_not_nil(commands[7]:find("Powered variant:boolean:true", 1, true))
+            assert.is_false(WmtPower.bringing_up)
+            -- Released afterwards under the ownership rule
+            assert.are.equal(WmtPower.COMMAND_POWER_OFF, commands[#commands])
+            assert.is_false(KoboBluetooth.wifi_borrowed)
+
+            lfs._clearFileStates()
+        end)
+
+        it("should not start the Bluetooth daemon when the cold-boot bring-up fails", function()
+            setMockExecuteResult(1)
+            setMockPopenOutput("variant boolean false")
+            clearExecutedCommands()
+            local NetworkMgr = require("ui/network/manager")
+            NetworkMgr:_reset()
+            NetworkMgr:_setWifiState(false)
+            local lfs = require("libs/libkoreader-lfs")
+            lfs._setFileState(WmtPower.BT_DEVICE, { exists = false })
+            lfs._setFileState(WmtPower.STACK_READY_MARKER, { exists = false })
+
+            local instance = MTKBluetooth:new()
+            instance:initWithPlugin(mock_plugin)
+            instance:turnBluetoothOn()
+
+            UIManager:executeScheduledTasks(210)
+
+            for _, cmd in ipairs(getExecutedCommands()) do
+                assert.is_nil(cmd:find("dbus-send", 1, true))
+            end
+            assert.is_false(WmtPower.bringing_up)
+            assert.is_false(KoboBluetooth.wifi_borrowed)
+
+            lfs._clearFileStates()
+        end)
+
+        it("should fall back to powering the chip when On() fails with WiFi off, and release it", function()
+            setMockExecuteResult(1)
+            setMockPopenOutput("variant boolean false")
+            clearExecutedCommands()
+            local NetworkMgr = require("ui/network/manager")
+            NetworkMgr:_reset()
+            NetworkMgr:_setWifiState(false)
+            local lfs = require("libs/libkoreader-lfs")
+
+            local instance = MTKBluetooth:new()
+            instance:initWithPlugin(mock_plugin)
+            instance:turnBluetoothOn()
+
+            -- The subprocess ran the fallback: in real life the marker file now exists
+            lfs._setFileState(WmtPower.POWERED_MARKER, { exists = true, attributes = { mode = "file" } })
+
+            UIManager:executeScheduledTasks(90)
+
+            local commands = getExecutedCommands()
+            assert.are.equal(WmtPower.COMMAND_CLEAR_POWERED, commands[1])
+            assert.is_not_nil(commands[2]:find("BluedroidManager1.On", 1, true))
+            assert.are.equal(WmtPower.COMMAND_MARK_POWERED, commands[3])
+            assert.are.equal(WmtPower.COMMAND_POWER_ON, commands[4])
+            assert.is_not_nil(commands[5]:find("BluedroidManager1.On", 1, true))
+            assert.are.equal(WmtPower.COMMAND_CLEAR_POWERED, commands[#commands - 1])
+            assert.are.equal(WmtPower.COMMAND_POWER_OFF, commands[#commands])
+            assert.are.equal(0, #NetworkMgr._turn_off_wifi_calls)
+            assert.is_false(KoboBluetooth.wifi_borrowed)
+            assert.is_true(wasBroadcast("BluetoothWifiReleased"))
+        end)
+
+        it("should not touch WiFi if already on", function()
+            setMockExecuteResult(0)
+            setMockPopenOutput("variant boolean false")
+            clearExecutedCommands()
             local NetworkMgr = require("ui/network/manager")
             NetworkMgr:_reset()
             NetworkMgr:_setWifiState(true)
@@ -198,8 +333,133 @@ describe("MTKBluetooth", function()
             instance:initWithPlugin(mock_plugin)
             instance:turnBluetoothOn()
 
-            -- Should not have called turnOnWifi
+            assert.is_false(KoboBluetooth.wifi_borrowed)
+
+            UIManager:executeScheduledTasks()
+
+            for _, cmd in ipairs(getExecutedCommands()) do
+                assert.is_not.equal(WmtPower.COMMAND_POWER_ON, cmd)
+                assert.is_not.equal(WmtPower.COMMAND_POWER_OFF, cmd)
+            end
             assert.are.equal(0, #NetworkMgr._turn_on_wifi_calls)
+            assert.are.equal(0, #NetworkMgr._turn_off_wifi_calls)
+            assert.is_false(wasBroadcast("BluetoothWifiReleased"))
+        end)
+
+        it("should wait for KOReader's WiFi restore after resume instead of powering the chip", function()
+            setMockExecuteResult(0)
+            setMockPopenOutput("variant boolean false")
+            clearExecutedCommands()
+            local NetworkMgr = require("ui/network/manager")
+            NetworkMgr:_reset()
+            NetworkMgr:_setWifiState(false)
+            -- NetworkListener:onResume is restoring Wi-Fi in the background
+            NetworkMgr.wifi_was_on = true
+            G_reader_settings:saveSetting("auto_restore_wifi", true)
+
+            local instance = MTKBluetooth:new()
+            instance:initWithPlugin(mock_plugin)
+            instance:turnBluetoothOn(true)
+
+            assert.is_false(KoboBluetooth.wifi_borrowed)
+
+            -- Still waiting for Wi-Fi: nothing has been executed yet
+            UIManager:executeScheduledTasks(3)
+            assert.are.equal(0, #getExecutedCommands())
+
+            -- The restore script brought Wi-Fi up: Bluetooth is enabled, Wi-Fi is left alone
+            NetworkMgr:_setWifiState(true)
+            UIManager:executeScheduledTasks()
+
+            local commands = getExecutedCommands()
+            assert.are.equal(2, #commands)
+            assert.is_not_nil(commands[1]:find("BluedroidManager1.On", 1, true))
+            assert.are.equal(0, #NetworkMgr._turn_off_wifi_calls)
+            assert.is_true(NetworkMgr:isWifiOn())
+
+            G_reader_settings:saveSetting("auto_restore_wifi", nil)
+        end)
+
+        it("should not power the chip while a NetworkMgr connection attempt is pending", function()
+            setMockExecuteResult(0)
+            setMockPopenOutput("variant boolean false")
+            clearExecutedCommands()
+            local NetworkMgr = require("ui/network/manager")
+            NetworkMgr:_reset()
+            NetworkMgr:_setWifiState(false)
+            NetworkMgr.pending_connection = true
+
+            local instance = MTKBluetooth:new()
+            instance:initWithPlugin(mock_plugin)
+            instance:turnBluetoothOn()
+
+            assert.is_false(KoboBluetooth.wifi_borrowed)
+
+            NetworkMgr:_setWifiState(true)
+            UIManager:executeScheduledTasks()
+
+            for _, cmd in ipairs(getExecutedCommands()) do
+                assert.is_not.equal(WmtPower.COMMAND_POWER_ON, cmd)
+                assert.is_not.equal(WmtPower.COMMAND_POWER_OFF, cmd)
+            end
+
+            NetworkMgr:_reset()
+        end)
+
+        it("should leave the WiFi function on when something else started using it meanwhile", function()
+            setMockExecuteResult(0)
+            setMockPopenOutput("variant boolean false")
+            clearExecutedCommands()
+            local NetworkMgr = require("ui/network/manager")
+            NetworkMgr:_reset()
+            NetworkMgr:_setWifiState(false)
+
+            local instance = MTKBluetooth:new()
+            instance:initWithPlugin(mock_plugin)
+            instance:turnBluetoothOn()
+
+            assert.is_true(KoboBluetooth.wifi_borrowed)
+
+            -- The subprocess powered the chip (fallback), and someone called
+            -- NetworkMgr:enableWifi() while Bluetooth was coming up
+            require("libs/libkoreader-lfs")._setFileState(WmtPower.POWERED_MARKER, {
+                exists = true,
+                attributes = { mode = "file" },
+            })
+            NetworkMgr.pending_connection = true
+            UIManager:executeScheduledTasks()
+
+            for _, cmd in ipairs(getExecutedCommands()) do
+                assert.is_not.equal(WmtPower.COMMAND_POWER_OFF, cmd)
+            end
+            assert.are.equal(0, #NetworkMgr._turn_off_wifi_calls)
+            -- The hold is released either way so waiters can proceed
+            assert.is_false(KoboBluetooth.wifi_borrowed)
+            assert.is_true(wasBroadcast("BluetoothWifiReleased"))
+
+            NetworkMgr:_reset()
+        end)
+
+        it("should release the hold without touching WiFi when the chip was never powered", function()
+            setMockExecuteResult(1)
+            setMockPopenOutput("variant boolean false")
+            clearExecutedCommands()
+            local NetworkMgr = require("ui/network/manager")
+            NetworkMgr:_reset()
+            NetworkMgr:_setWifiState(false)
+
+            local instance = MTKBluetooth:new()
+            instance:initWithPlugin(mock_plugin)
+            instance:turnBluetoothOn()
+
+            -- Marker absent: as if the fallback handshake itself had not run
+            UIManager:executeScheduledTasks(90)
+
+            for _, cmd in ipairs(getExecutedCommands()) do
+                assert.is_not.equal(WmtPower.COMMAND_POWER_OFF, cmd)
+            end
+            assert.is_false(KoboBluetooth.wifi_borrowed)
+            assert.is_true(wasBroadcast("BluetoothWifiReleased"))
         end)
     end)
 
