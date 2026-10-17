@@ -557,6 +557,20 @@ if not package.preload["ffi/util"] then
     end
 end
 
+-- Mock src/lib/bluetooth/subprocess: the real one chdirs and closes fds 3-1023 of
+-- the calling process, which is the test runner here (runInSubProcess runs inline)
+if not package.preload["src/lib/bluetooth/subprocess"] then
+    package.preload["src/lib/bluetooth/subprocess"] = function()
+        local Subprocess = { _detach_calls = 0 }
+
+        function Subprocess.detachFromStorage()
+            Subprocess._detach_calls = Subprocess._detach_calls + 1
+        end
+
+        return Subprocess
+    end
+end
+
 -- Mock ffi/posix_h module (FFI bindings not available in test environment)
 if not package.preload["ffi/posix_h"] then
     package.preload["ffi/posix_h"] = function()
