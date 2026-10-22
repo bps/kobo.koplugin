@@ -2354,7 +2354,9 @@ local function createWmtFileMocker()
                 table.insert(mocker.writes[path], text)
                 return true
             end,
-            close = function() end,
+            close = function()
+                return true
+            end,
         }
     end
 
