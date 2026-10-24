@@ -15,8 +15,7 @@ local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 
 local InputDeviceHandler = {
-    input_device_path = "/dev/input/event4",
-    -- Isolated readers for Bluetooth-only input (keyed by device address)
+    -- Isolated readers: address -> path -> { reader, hid_parent }
     isolated_readers = {},
     -- Callbacks for isolated reader events
     key_event_callbacks = {},
@@ -52,7 +51,6 @@ function InputDeviceHandler:new()
     setmetatable(instance, self)
     self.__index = self
 
-    instance.input_device_path = "/dev/input/event4"
     instance.isolated_readers = {}
     instance.key_event_callbacks = {}
     instance.device_open_callbacks = {}
@@ -275,243 +273,117 @@ function InputDeviceHandler:_isSameBluetoothAddress(a, b)
 end
 
 ---
---- Gets the name of an input device from sysfs
---- @param event_path string Path to /dev/input/eventN
---- @return string|nil Device name or nil if not found
-function InputDeviceHandler:_getDeviceName(event_path)
-    local event_num = event_path:match("event(%d+)$")
-
-    if not event_num then
-        return nil
-    end
-
-    local name_path = string.format("/sys/class/input/event%s/device/name", event_num)
-    local file = io.open(name_path, "r")
-
-    if not file then
-        return nil
-    end
-
-    local name = file:read("*l")
-    file:close()
-
-    return name
-end
-
----
---- Gets the unique identifier of an input device from sysfs. For Bluetooth HID
---- devices this is the remote's address (on MTK Kobos with the byte order reversed).
---- @param event_path string Path to /dev/input/eventN
---- @return string|nil Identifier, empty when the device has none, nil if unreadable
-function InputDeviceHandler:_getDeviceUniq(event_path)
-    local event_num = event_path:match("event(%d+)$")
-
-    if not event_num then
-        return nil
-    end
-
-    local content = self:_readSysfsFile(string.format("/sys/class/input/event%s/device/uniq", event_num))
-
-    if not content then
-        return nil
-    end
-
-    return content:match("^[^\n]*")
-end
-
----
---- Checks whether an input node is already opened by an isolated reader.
---- Two devices of the same model share a name, so a node that already belongs
---- to one of them must not be matched again for the other.
+--- Reads the HID parent and Bluetooth identity of an input node.
+--- Never infer ownership from an event number or a non-unique device name.
 --- @param device_path string Path to /dev/input/eventN
---- @return boolean True if a reader is open on that path
-function InputDeviceHandler:_isPathInUse(device_path)
-    for _, reader_info in pairs(self.isolated_readers) do
-        if reader_info.device_path == device_path and reader_info.reader:isOpen() then
-            return true
-        end
-    end
+--- @return table|nil Identity with path, hid_parent and uniq
+function InputDeviceHandler:_getInputIdentity(device_path)
+    local event = device_path:match("^/dev/input/(event%d+)$")
 
-    return false
-end
-
----
---- Finds the input device path for a Bluetooth device by matching device names
----
---- Scans all Bluetooth input devices and compares their sysfs device names
---- against the provided D-Bus device name. This provides direct correlation
---- between D-Bus Bluetooth devices and kernel input devices.
----
---- Example:
----   D-Bus name: "8BitDo Micro gamepad"
----   Sysfs name: cat /sys/class/input/event4/device/name → "8BitDo Micro gamepad"
----   Match! → Returns "/dev/input/event4"
----
---- When the node carries the remote's address (sysfs uniq), that is what is matched,
---- so two devices of the same model are told apart; the name is the fallback.
---- @param device_name string Device name from D-Bus
---- @param device_address string|nil Bluetooth address of the device
---- @return string|nil Path to matching device or nil if not found
-function InputDeviceHandler:findDeviceByName(device_name, device_address)
-    if not device_name or device_name == "" then
-        logger.dbg("InputDeviceHandler: No device name provided for matching")
-
+    if not event then
         return nil
     end
 
-    logger.dbg("InputDeviceHandler: Searching for device with name:", device_name)
+    local sysfs_path = "/sys/class/input/" .. event
+    local handle = io.popen("readlink " .. sysfs_path .. " 2>/dev/null")
 
-    local detected_devices = self:detectBluetoothInputDevices()
+    if not handle then
+        return nil
+    end
 
-    for _, device_path in ipairs(detected_devices) do
-        local sysfs_name = self:_getDeviceName(device_path)
+    local target = handle:read("*l")
+    handle:close()
+    local parent = target and target:match("^(.-/uhid/[^/]+)/input/")
 
-        if sysfs_name then
-            logger.dbg("InputDeviceHandler: Checking", device_path, "name:", sysfs_name)
+    if not parent or not parent:match("/0005:") then
+        return nil
+    end
 
-            local uniq = device_address and self:_getDeviceUniq(device_path)
-            local matches
+    local uniq = self:_readSysfsFile(sysfs_path .. "/device/uniq")
+    uniq = uniq and uniq:match("^%s*(.-)%s*$")
 
-            if uniq and uniq ~= "" then
-                matches = self:_isSameBluetoothAddress(uniq, device_address)
-            else
-                matches = sysfs_name == device_name
-            end
+    if not uniq or uniq == "" then
+        local uevent = self:_readSysfsFile(sysfs_path .. "/device/../../uevent") or ""
+        uniq = uevent:match("HID_UNIQ=([%x:]+)")
+    end
 
-            if matches and not self:_isPathInUse(device_path) then
-                logger.info("InputDeviceHandler: Found matching device:", device_path, "for", device_name)
+    return { path = device_path, hid_parent = parent, uniq = uniq }
+end
 
-                return device_path
+---
+--- Finds every input collection belonging to a Bluetooth address.
+--- A matching uniq establishes ownership of a HID parent. Siblings without a
+--- uniq are accepted only under that parent; an explicit different uniq wins.
+--- @param device_info table Device information with address
+--- @return table Array of verified input identities, sorted by path
+function InputDeviceHandler:findInputDevices(device_info)
+    local identities, parents = {}, {}
+
+    for _, path in ipairs(self:detectBluetoothInputDevices()) do
+        local identity = self:_getInputIdentity(path)
+
+        if identity then
+            table.insert(identities, identity)
+
+            if self:_isSameBluetoothAddress(identity.uniq, device_info.address) then
+                parents[identity.hid_parent] = true
             end
         end
     end
 
-    logger.dbg("InputDeviceHandler: No matching device found for name:", device_name)
+    local matches = {}
 
-    return nil
+    for _, identity in ipairs(identities) do
+        local matching = self:_isSameBluetoothAddress(identity.uniq, device_info.address)
+        local unidentified_sibling = (not identity.uniq or identity.uniq == "") and parents[identity.hid_parent]
+
+        if matching or unidentified_sibling then
+            table.insert(matches, identity)
+        end
+    end
+
+    table.sort(matches, function(a, b)
+        return a.path < b.path
+    end)
+
+    return matches
 end
 
 ---
---- Auto-detects the appropriate input device path for a Bluetooth device
----
---- Uses intelligent fallback logic:
----   1. Single Bluetooth device detected → Auto-select it
----   2. No devices detected → Fall back to /dev/input/event4
----   3. Multiple devices detected → Fall back to /dev/input/event4 (ambiguous case)
----
---- The fallback to event4 works because on MTK Kobo devices, Bluetooth HID devices
---- typically appear as event4 (event0-3 are used by built-in hardware).
----
---- Falls back to hardcoded /dev/input/event4 if detection fails or multiple devices found
---- @return string Path to input device
-function InputDeviceHandler:_autoDetectInputDevice()
-    logger.dbg("InputDeviceHandler: Auto-detecting Bluetooth input device")
-
-    local detected_devices = self:detectBluetoothInputDevices()
-
-    if #detected_devices == 0 then
-        logger.warn("InputDeviceHandler: No Bluetooth input devices detected, using fallback")
-
-        return self.input_device_path
+--- Finds a verified input node without waiting, for the direct connect loop.
+--- @param device_info table Device information with address
+--- @return string|nil Path to the first verified input collection
+function InputDeviceHandler:findInputNodeForDevice(device_info)
+    if not device_info or not device_info.address then
+        return nil
     end
 
-    if #detected_devices == 1 then
-        logger.info("InputDeviceHandler: Auto-detected single Bluetooth device:", detected_devices[1])
+    self:_bindUnclaimedHidDevices(device_info.address)
+    local devices = self:findInputDevices(device_info)
 
-        return detected_devices[1]
-    end
-
-    logger.warn("InputDeviceHandler: Multiple Bluetooth devices detected (", #detected_devices, "), using fallback")
-
-    return self.input_device_path
+    return devices[1] and devices[1].path
 end
 
 ---
---- Waits for a Bluetooth input device to appear in /sys/class/input/
----
---- After a Bluetooth device connects via D-Bus, there's a brief delay before the
---- kernel creates the corresponding /dev/input/eventN device node. This function
---- polls for the device to appear instead of using a fixed sleep duration.
----
---- Detects NEW devices by tracking the initial device count and waiting for an
---- increase. This handles the case where other Bluetooth devices are already connected.
----
---- Typical scenarios:
----   - Device appears in < 1 second (most cases)
----   - Timeout after 3 seconds (connection issues or non-HID device)
----
---- This replaces fixed sleep delays with event-based waiting, providing faster
---- response times while still handling edge cases.
----
---- A node that appeared just before the initial snapshot never counts as new;
---- when a device name is given, a match by address or name finds it either way.
----
---- @param timeout number Maximum time to wait in seconds (default: 3)
---- @param poll_interval number Time between checks in seconds (default: 0.2)
---- @param device_address string|nil Bluetooth address of the awaited device (hid-generic binding, node matching)
---- @param device_name string|nil Device name to match against input node names
---- @return string|nil Path to detected device or nil if timeout
-function InputDeviceHandler:waitForBluetoothInputDevice(timeout, poll_interval, device_address, device_name)
-    timeout = timeout or 5
-    poll_interval = poll_interval or 0.2
-
-    local ffiUtil = require("ffi/util")
+--- Waits for verified input collections to appear after a connection.
+--- @param device_info table Device information with address
+--- @param timeout number Maximum seconds to wait (default: 5)
+--- @return table Array of verified input identities
+function InputDeviceHandler:waitForBluetoothInputDevice(device_info, timeout)
     local start_time = os.time()
 
-    -- Get initial device count to detect new devices
-    local initial_devices = self:detectBluetoothInputDevices()
-    local initial_count = #initial_devices
+    while os.time() - start_time < (timeout or 5) do
+        self:_bindUnclaimedHidDevices(device_info.address)
+        local devices = self:findInputDevices(device_info)
 
-    logger.dbg(
-        "InputDeviceHandler: Waiting for NEW Bluetooth input device (initial count:",
-        initial_count,
-        "timeout:",
-        timeout,
-        "s)"
-    )
-
-    while os.time() - start_time < timeout do
-        logger.dbg("InputDeviceHandler: Polling for Bluetooth input devices...")
-        self:_bindUnclaimedHidDevices(device_address)
-
-        local named_path = device_name and self:findDeviceByName(device_name, device_address)
-
-        if named_path then
-            return named_path
+        if #devices > 0 then
+            return devices
         end
 
-        local detected_devices = self:detectBluetoothInputDevices()
-        logger.dbg("InputDeviceHandler: Detected", #detected_devices, "Bluetooth input devices")
-
-        -- Check if device count increased
-        if #detected_devices > initial_count then
-            -- Find the new device (one that wasn't in initial list)
-            for _, device_path in ipairs(detected_devices) do
-                local is_new = true
-
-                for _, initial_path in ipairs(initial_devices) do
-                    if device_path == initial_path then
-                        is_new = false
-
-                        break
-                    end
-                end
-
-                if is_new then
-                    logger.info("InputDeviceHandler: New Bluetooth input device appeared:", device_path)
-
-                    return device_path
-                end
-            end
-        end
-
-        -- TODO(OGKevin): use UIManager:nextTick instead of sleep to avoid blocking main thread
-        ffiUtil.sleep(poll_interval)
+        ffiutil.sleep(0.2)
     end
 
-    logger.warn("InputDeviceHandler: Timeout waiting for new Bluetooth input device")
-
-    return nil
+    return {}
 end
 
 ---
@@ -534,91 +406,88 @@ function InputDeviceHandler:autoOpenConnectedDevices(paired_devices)
 end
 
 ---
---- Looks for the input node of a paired device without waiting for it.
---- Hands the device to hid-generic first if it sits driverless on the HID bus
---- (see _bindUnclaimedHidDevices), then matches the input nodes by address, or
---- by name for nodes without one (see findDeviceByName).
---- @param device_info table Device information with address and name
---- @return string|nil Path to the input node, or nil if it does not exist yet
-function InputDeviceHandler:findInputNodeForDevice(device_info)
-    self:_bindUnclaimedHidDevices(device_info.address)
-
-    return self:findDeviceByName(device_info.name, device_info.address)
-end
-
----
---- Opens a Bluetooth input device using the isolated reader.
---- This bypasses KOReader's main input system, providing events only from Bluetooth devices.
----
---- Device detection strategy (in order of preference):
----   1. Node matching: Match the device's address or D-Bus name against the input nodes (findInputNodeForDevice)
----   2. Wait for new device: If wait_for_device=true and no match found, poll for new devices
----   3. Auto-detection: Single device auto-select, fallback to event4
----
---- Node matching is tried first to avoid waiting if the device already exists.
---- This is particularly useful when auto-opening devices on startup or when
---- the device was already connected before the connection event.
----
---- Name matching provides direct correlation between D-Bus (MAC address) and
---- kernel (/dev/input/eventN) by comparing device names:
----   D-Bus: device.name = "8BitDo Micro gamepad"
----   Sysfs: /sys/class/input/event4/device/name = "8BitDo Micro gamepad"
----
---- @param device_info table Device information with address and name
---- @param show_messages boolean Optional, whether to show UI messages (default: true)
---- @param wait_for_device boolean Optional, whether to wait for device to appear (default: false)
---- @return boolean True if successfully opened, false otherwise
+--- Opens all verified input collections for a Bluetooth device.
+--- Repeated calls add late collections without reopening existing readers.
+--- Unidentified nodes are rejected, even if their names match.
+--- @param device_info table Device information with address
+--- @param show_messages boolean Whether to show UI messages (default: true)
+--- @param wait_for_device boolean Whether to wait for input nodes (default: false)
+--- @return boolean True if at least one input reader is open
 function InputDeviceHandler:openIsolatedInputDevice(device_info, show_messages, wait_for_device)
-    if show_messages == nil then
-        show_messages = true
+    if not device_info or not device_info.address then
+        return false
     end
 
-    local detected_path = self:findInputNodeForDevice(device_info)
+    self:_bindUnclaimedHidDevices(device_info.address)
+    local devices = self:findInputDevices(device_info)
 
-    if detected_path then
-        logger.info("InputDeviceHandler: Matched input node:", detected_path)
+    if #devices == 0 and wait_for_device then
+        devices = self:waitForBluetoothInputDevice(device_info)
     end
 
-    if not detected_path and wait_for_device then
-        local info_msg = InfoMessage:new({
-            text = _("Waiting 5 seconds for Bluetooth input device to appear..."),
-            timeout = 0,
-        })
+    local readers = self.isolated_readers[device_info.address] or {}
+    self.isolated_readers[device_info.address] = readers
+    local opened = 0
+    local closed_paths = {}
 
-        if show_messages then
-            UIManager:show(info_msg)
+    for _, identity in ipairs(devices) do
+        local existing = readers[identity.path]
+
+        if not existing or existing.hid_parent ~= identity.hid_parent or not existing.reader:isOpen() then
+            local reader = BluetoothInputReader:new()
+
+            if reader:open(identity.path) then
+                for _, callback in ipairs(self.key_event_callbacks) do
+                    reader:registerKeyCallback(callback)
+                end
+
+                -- A reused event path must not remain assigned to another remote.
+                local previous_owners = {}
+
+                for address, owned in pairs(self.isolated_readers) do
+                    if address ~= device_info.address and owned[identity.path] then
+                        table.insert(previous_owners, address)
+                    end
+                end
+
+                for _, address in ipairs(previous_owners) do
+                    self:_closeInputNode(address, identity.path)
+                end
+
+                if existing then
+                    existing.reader:close()
+                end
+
+                readers[identity.path] = { reader = reader, hid_parent = identity.hid_parent }
+                self.isolated_readers[device_info.address] = readers
+
+                if existing then
+                    self:_notifyInputCallbacks(self.device_close_callbacks, device_info.address, identity.path)
+                end
+
+                opened = opened + 1
+                self:_notifyInputCallbacks(self.device_open_callbacks, device_info.address, identity.path)
+            elseif existing then
+                existing.reader:close()
+                readers[identity.path] = nil
+                table.insert(closed_paths, identity.path)
+            end
         end
-
-        logger.dbg("InputDeviceHandler: Waiting for input device to appear...")
-        detected_path = self:waitForBluetoothInputDevice(nil, nil, device_info.address, device_info.name)
-
-        if show_messages then
-            UIManager:close(info_msg)
-        end
-
-        if detected_path then
-            logger.info("InputDeviceHandler: Device appeared while waiting:", detected_path)
-        end
     end
 
-    if not detected_path then
-        detected_path = self:_autoDetectInputDevice()
+    if not next(readers) then
+        self.isolated_readers[device_info.address] = nil
     end
 
-    logger.info(
-        "InputDeviceHandler: Opening isolated Bluetooth input device:",
-        detected_path,
-        "for",
-        device_info.address
-    )
+    -- Close callbacks must see the final set, not an intermediate empty map.
+    for _, path in ipairs(closed_paths) do
+        self:_notifyInputCallbacks(self.device_close_callbacks, device_info.address, path)
+    end
 
-    local reader = BluetoothInputReader:new()
-    local success = reader:open(detected_path)
+    if not next(readers) then
+        self.isolated_readers[device_info.address] = nil
 
-    if not success then
-        logger.warn("InputDeviceHandler: Failed to open isolated reader for", detected_path)
-
-        if show_messages then
+        if show_messages ~= false then
             UIManager:show(InfoMessage:new({
                 text = _("Bluetooth input device not found.\nYou may need to reconnect the device."),
                 timeout = 3,
@@ -628,28 +497,9 @@ function InputDeviceHandler:openIsolatedInputDevice(device_info, show_messages, 
         return false
     end
 
-    for _, callback in ipairs(self.key_event_callbacks) do
-        reader:registerKeyCallback(callback)
-    end
-
-    self.isolated_readers[device_info.address] = {
-        reader = reader,
-        device_path = detected_path,
-    }
-
-    for _, callback in ipairs(self.device_open_callbacks) do
-        local ok, err = pcall(callback, device_info.address, detected_path)
-
-        if not ok then
-            logger.warn("InputDeviceHandler: Device open callback error:", err)
-        end
-    end
-
-    if show_messages then
-        local label = device_info.name or device_info.address or detected_path
-
+    if opened > 0 and show_messages ~= false then
         UIManager:show(InfoMessage:new({
-            text = _("%s ready"):format(label),
+            text = _("%s ready"):format(device_info.name or device_info.address),
             timeout = 2,
         }))
     end
@@ -658,63 +508,70 @@ function InputDeviceHandler:openIsolatedInputDevice(device_info, show_messages, 
 end
 
 ---
---- Closes an isolated Bluetooth input device.
---- @param device_info table Device information with address
-function InputDeviceHandler:closeIsolatedInputDevice(device_info)
-    local reader_info = self.isolated_readers[device_info.address]
-
-    if not reader_info then
-        logger.dbg("InputDeviceHandler: No isolated reader for", device_info.address)
-
-        return
-    end
-
-    local device_path = reader_info.device_path
-
-    logger.info("InputDeviceHandler: Closing isolated reader for", device_info.address)
-
-    reader_info.reader:close()
-    self.isolated_readers[device_info.address] = nil
-
-    for _, callback in ipairs(self.device_close_callbacks) do
-        local ok, err = pcall(callback, device_info.address, device_path)
+--- Invokes per-node callbacks after the reader map has been updated.
+--- @param callbacks table Callback array
+--- @param address string Bluetooth address
+--- @param path string Input path
+function InputDeviceHandler:_notifyInputCallbacks(callbacks, address, path)
+    for _, callback in ipairs(callbacks) do
+        local ok, err = pcall(callback, address, path)
 
         if not ok then
-            logger.warn("InputDeviceHandler: Device close callback error:", err)
+            logger.warn("InputDeviceHandler: Input callback error:", err)
         end
     end
 end
 
 ---
---- Closes all isolated Bluetooth input devices.
---- Iterates through all open isolated readers and closes them.
---- Safe to call even if no devices are open.
-function InputDeviceHandler:closeAllIsolatedInputDevices()
-    logger.dbg("InputDeviceHandler: Closing all isolated input devices")
+--- Closes one collection, retaining the other collections of the same remote.
+--- @param address string Bluetooth address
+--- @param path string Input path
+function InputDeviceHandler:_closeInputNode(address, path)
+    local readers = self.isolated_readers[address]
+    local info = readers and readers[path]
 
-    local count = 0
-
-    for device_address, reader_info in pairs(self.isolated_readers) do
-        local device_path = reader_info.device_path
-
-        logger.info("InputDeviceHandler: Closing isolated reader for", device_address)
-
-        reader_info.reader:close()
-
-        for _, callback in ipairs(self.device_close_callbacks) do
-            local ok, err = pcall(callback, device_address, device_path)
-
-            if not ok then
-                logger.warn("InputDeviceHandler: Device close callback error:", err)
-            end
-        end
-
-        count = count + 1
+    if not info then
+        return
     end
 
-    self.isolated_readers = {}
+    info.reader:close()
+    readers[path] = nil
 
-    logger.dbg("InputDeviceHandler: Closed", count, "isolated input devices")
+    if not next(readers) then
+        self.isolated_readers[address] = nil
+    end
+
+    self:_notifyInputCallbacks(self.device_close_callbacks, address, path)
+end
+
+---
+--- Closes every input collection of one remote.
+--- @param device_info table Device information with address
+function InputDeviceHandler:closeIsolatedInputDevice(device_info)
+    local readers = self.isolated_readers[device_info.address] or {}
+    local paths = {}
+
+    for path in pairs(readers) do
+        table.insert(paths, path)
+    end
+
+    for _, path in ipairs(paths) do
+        self:_closeInputNode(device_info.address, path)
+    end
+end
+
+---
+--- Closes all isolated Bluetooth input devices.
+function InputDeviceHandler:closeAllIsolatedInputDevices()
+    local addresses = {}
+
+    for address in pairs(self.isolated_readers) do
+        table.insert(addresses, address)
+    end
+
+    for _, address in ipairs(addresses) do
+        self:closeIsolatedInputDevice({ address = address })
+    end
 end
 
 ---
@@ -729,8 +586,10 @@ end
 function InputDeviceHandler:registerKeyEventCallback(callback)
     table.insert(self.key_event_callbacks, callback)
 
-    for _, reader_info in pairs(self.isolated_readers) do
-        reader_info.reader:registerKeyCallback(callback)
+    for _, readers in pairs(self.isolated_readers) do
+        for _, info in pairs(readers) do
+            info.reader:registerKeyCallback(callback)
+        end
     end
 
     logger.dbg("InputDeviceHandler: Registered key event callback")
@@ -765,8 +624,10 @@ end
 function InputDeviceHandler:clearKeyEventCallbacks()
     self.key_event_callbacks = {}
 
-    for _, reader_info in pairs(self.isolated_readers) do
-        reader_info.reader:clearCallbacks()
+    for _, readers in pairs(self.isolated_readers) do
+        for _, info in pairs(readers) do
+            info.reader:clearCallbacks()
+        end
     end
 
     logger.dbg("InputDeviceHandler: Cleared all key event callbacks")
@@ -780,14 +641,13 @@ end
 --- @param timeout_ms number Optional timeout in milliseconds (default: 0 for non-blocking)
 --- @return table|nil Array of all events from all Bluetooth devices, or nil if none
 function InputDeviceHandler:pollIsolatedReaders(timeout_ms)
-    local all_events = {}
-    local disconnected_addresses = {}
+    local all_events, disconnected = {}, {}
 
-    for address, reader_info in pairs(self.isolated_readers) do
-        local events = reader_info.reader:poll(timeout_ms)
+    for address, readers in pairs(self.isolated_readers) do
+        for path, info in pairs(readers) do
+            local events = info.reader:poll(timeout_ms)
 
-        if events then
-            for _, ev in ipairs(events) do
+            for _, ev in ipairs(events or {}) do
                 local new_ev = {}
 
                 for k, v in pairs(ev) do
@@ -797,27 +657,15 @@ function InputDeviceHandler:pollIsolatedReaders(timeout_ms)
                 new_ev.device_address = address
                 table.insert(all_events, new_ev)
             end
-        end
 
-        if not reader_info.reader:isOpen() then
-            table.insert(disconnected_addresses, {
-                address = address,
-                device_path = reader_info.device_path,
-            })
+            if not info.reader:isOpen() then
+                table.insert(disconnected, { address = address, path = path })
+            end
         end
     end
 
-    for _, disconnected in ipairs(disconnected_addresses) do
-        logger.info("InputDeviceHandler: Cleaning up disconnected reader for", disconnected.address)
-        self.isolated_readers[disconnected.address] = nil
-
-        for _, callback in ipairs(self.device_close_callbacks) do
-            local ok, err = pcall(callback, disconnected.address, disconnected.device_path)
-
-            if not ok then
-                logger.warn("InputDeviceHandler: Device close callback error:", err)
-            end
-        end
+    for _, node in ipairs(disconnected) do
+        self:_closeInputNode(node.address, node.path)
     end
 
     if #all_events > 0 then
@@ -828,26 +676,37 @@ function InputDeviceHandler:pollIsolatedReaders(timeout_ms)
 end
 
 ---
---- Gets the isolated reader for a specific device
---- @param device_address string MAC address of the device
---- @return table|nil The BluetoothInputReader instance or nil if not open
-function InputDeviceHandler:getIsolatedReader(device_address)
-    local reader_info = self.isolated_readers[device_address]
+--- Gets one open reader of a remote, optionally for a specific collection.
+--- @param device_address string Bluetooth address
+--- @param device_path string|nil Input path; otherwise the first sorted path
+--- @return table|nil BluetoothInputReader
+function InputDeviceHandler:getIsolatedReader(device_address, device_path)
+    local readers = self.isolated_readers[device_address] or {}
 
-    if reader_info then
-        return reader_info.reader
+    if device_path then
+        return readers[device_path] and readers[device_path].reader
     end
 
-    return nil
+    local paths = {}
+
+    for path in pairs(readers) do
+        table.insert(paths, path)
+    end
+
+    table.sort(paths)
+
+    return paths[1] and readers[paths[1]].reader
 end
 
 ---
---- Checks if any isolated readers are open.
---- @return boolean True if at least one isolated reader is open
+--- Checks whether any remote has an open input reader.
+--- @return boolean
 function InputDeviceHandler:hasIsolatedReaders()
-    for _, reader_info in pairs(self.isolated_readers) do
-        if reader_info.reader:isOpen() then
-            return true
+    for _, readers in pairs(self.isolated_readers) do
+        for _, info in pairs(readers) do
+            if info.reader:isOpen() then
+                return true
+            end
         end
     end
 

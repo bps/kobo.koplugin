@@ -120,6 +120,26 @@ if Device.isYourDeviceType() then
 Create `spec/lib/bluetooth/adapters/your_adapter_spec.lua` following the pattern in
 `mtk_adapter_spec.lua`.
 
+## Input collection ownership
+
+A Bluetooth remote can expose several input collections (keyboard, consumer control and system
+control). The input handler keeps a separate reader for every verified collection, grouped by
+Bluetooth address. Key bindings continue to use a path-to-address map.
+
+Ownership comes from the input node's sysfs `uniq`, with `HID_UNIQ` on the HID parent as a fallback.
+MTK's reversed address byte order is accepted. A collection without an address is included only when
+another collection under the same HID parent establishes ownership. Explicit conflicting addresses
+are never included. Names and event numbers are not identity: unidentified nodes are rejected rather
+than falling back to `/dev/input/event4`.
+
+Opening a remote again adds new collections without duplicating existing readers. Each collection
+gets its own open/close callbacks; the remote is marked disconnected only after its last reader
+closes. Reused event paths are reopened when their HID parent changes.
+
+On hardware, verify every button after reconnecting and after suspend/resume, including sessions
+where event numbers change. If a device has no usable `uniq` or `HID_UNIQ`, collect its sysfs
+identity before adding a fallback. Do not infer ownership from a shared model name.
+
 ## See Also
 
 - [Interface Contract](https://github.com/ogkevin/kobo.koplugin/blob/main/src/lib/bluetooth/dbus_adapter_interface.lua) -

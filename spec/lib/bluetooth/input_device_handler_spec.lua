@@ -1,431 +1,336 @@
-describe("InputDeviceHandler", function()
-    local InputDeviceHandler
-    local handler
+local test_helper = require("spec.helper")
 
-    setup(function()
-        require("spec/helper")
-    end)
+describe("InputDeviceHandler collection ownership", function()
+    local InputDeviceHandler = require("src/lib/bluetooth/input_device_handler")
+    local Reader = require("src/lib/bluetooth/bluetooth_input_reader")
+    local io_mock = test_helper.createIOOpenMocker()
+    local handler, nodes, original_popen
+    local remote = { address = "AA:BB:CC:DD:EE:FF", name = "Identical name" }
+    local other = { address = "11:22:33:44:55:66", name = "Identical name" }
+
+    local function node(path, parent, uniq, hid_uniq)
+        nodes[path] = { parent = parent }
+        local sysfs = path:gsub("/dev/input/", "/sys/class/input/") .. "/device/"
+
+        for filename, content in pairs({
+            uniq = uniq or "",
+            ["../../uevent"] = hid_uniq and ("HID_UNIQ=" .. hid_uniq .. "\n") or "",
+        }) do
+            io_mock.setMockFile(sysfs .. filename, {
+                read = function()
+                    return content
+                end,
+                close = function() end,
+            })
+        end
+    end
 
     before_each(function()
-        InputDeviceHandler = require("src/lib/bluetooth/input_device_handler")
+        resetAllMocks()
         handler = InputDeviceHandler:new()
-    end)
+        nodes = {}
+        original_popen = io.popen
+        io_mock.install()
+        io.popen = function(command)
+            if command:match("^ls ") then
+                local paths = {}
 
-    describe("initialization", function()
-        it("should create a new instance with default values", function()
-            assert.is_not_nil(handler)
-            assert.are.equal("/dev/input/event4", handler.input_device_path)
-            assert.are.same({}, handler.isolated_readers)
-            assert.are.same({}, handler.key_event_callbacks)
-        end)
-    end)
-
-    describe("_getDeviceName", function()
-        it("should return nil for invalid path", function()
-            local name = handler:_getDeviceName("invalid")
-            assert.is_nil(name)
-        end)
-
-        it("should extract event number from path", function()
-            -- Mock the file read
-            local original_open = io.open
-            io.open = function(path, mode)
-                if path == "/sys/class/input/event4/device/name" then
-                    return {
-                        read = function()
-                            return "Test Device"
-                        end,
-                        close = function() end,
-                    }
+                for path in pairs(nodes) do
+                    table.insert(paths, (path:gsub("/dev/input/", "/sys/class/input/")))
                 end
 
-                return nil
+                table.sort(paths)
+
+                return {
+                    lines = function()
+                        local i = 0
+
+                        return function()
+                            i = i + 1
+
+                            return paths[i]
+                        end
+                    end,
+                    close = function() end,
+                }
             end
 
-            local name = handler:_getDeviceName("/dev/input/event4")
-            assert.are.equal("Test Device", name)
+            local event = command:match("readlink /sys/class/input/(event%d+)")
+            local info = event and nodes["/dev/input/" .. event]
 
-            io.open = original_open
-        end)
-    end)
-
-    describe("findDeviceByName", function()
-        it("should return nil when device name is empty", function()
-            local path = handler:findDeviceByName("")
-            assert.is_nil(path)
-        end)
-
-        it("should return nil when device name is nil", function()
-            local path = handler:findDeviceByName(nil)
-            assert.is_nil(path)
-        end)
-
-        it("should find device by matching name", function()
-            -- Mock detectBluetoothInputDevices
-            handler.detectBluetoothInputDevices = function()
-                return { "/dev/input/event4", "/dev/input/event5" }
-            end
-
-            -- Mock _getDeviceName
-            handler._getDeviceName = function(self, path)
-                if path == "/dev/input/event4" then
-                    return "Device A"
-                elseif path == "/dev/input/event5" then
-                    return "Device B"
-                end
-
-                return nil
-            end
-
-            local path = handler:findDeviceByName("Device B")
-            assert.are.equal("/dev/input/event5", path)
-        end)
-
-        it("should return nil when no matching device found", function()
-            handler.detectBluetoothInputDevices = function()
-                return { "/dev/input/event4" }
-            end
-
-            handler._getDeviceName = function(self, path)
-                return "Device A"
-            end
-
-            local path = handler:findDeviceByName("Device B")
-            assert.is_nil(path)
-        end)
-    end)
-
-    describe("_autoDetectInputDevice", function()
-        it("should return fallback when no devices detected", function()
-            handler.detectBluetoothInputDevices = function()
-                return {}
-            end
-
-            local path = handler:_autoDetectInputDevice()
-            assert.are.equal("/dev/input/event4", path)
-        end)
-
-        it("should auto-select when single device detected", function()
-            handler.detectBluetoothInputDevices = function()
-                return { "/dev/input/event5" }
-            end
-
-            local path = handler:_autoDetectInputDevice()
-            assert.are.equal("/dev/input/event5", path)
-        end)
-
-        it("should return fallback when multiple devices detected", function()
-            handler.detectBluetoothInputDevices = function()
-                return { "/dev/input/event4", "/dev/input/event5" }
-            end
-
-            local path = handler:_autoDetectInputDevice()
-            assert.are.equal("/dev/input/event4", path)
-        end)
-    end)
-
-    describe("waitForBluetoothInputDevice", function()
-        local original_time
-        local mock_time
-
-        before_each(function()
-            original_time = os.time
-            mock_time = 0
-
-            os.time = function()
-                return mock_time
-            end
-
-            -- Mock ffiUtil.sleep
-            package.loaded["ffi/util"] = {
-                sleep = function(duration)
-                    mock_time = mock_time + duration
+            return {
+                read = function()
+                    return info and ("../../devices/virtual/misc/uhid/" .. info.parent .. "/input/input9/" .. event)
                 end,
+                close = function() end,
             }
-        end)
-
-        after_each(function()
-            os.time = original_time
-            package.loaded["ffi/util"] = nil
-        end)
-
-        it("should detect new device when count increases from 0 to 1", function()
-            local call_count = 0
-
-            handler.detectBluetoothInputDevices = function()
-                call_count = call_count + 1
-
-                if call_count == 1 then
-                    return {} -- Initial scan: no devices
-                else
-                    return { "/dev/input/event4" } -- New device appeared
-                end
-            end
-
-            local path = handler:waitForBluetoothInputDevice(3, 0.1)
-            assert.are.equal("/dev/input/event4", path)
-        end)
-
-        it("should detect new device when count increases from 1 to 2", function()
-            local call_count = 0
-
-            handler.detectBluetoothInputDevices = function()
-                call_count = call_count + 1
-
-                if call_count == 1 then
-                    return { "/dev/input/event4" } -- Initial: 1 device
-                else
-                    return { "/dev/input/event4", "/dev/input/event5" } -- New device appeared
-                end
-            end
-
-            local path = handler:waitForBluetoothInputDevice(3, 0.1)
-            assert.are.equal("/dev/input/event5", path) -- Should return the NEW device
-        end)
-
-        it("should timeout when no new device appears", function()
-            handler.detectBluetoothInputDevices = function()
-                return { "/dev/input/event4" } -- Same device every time
-            end
-
-            local path = handler:waitForBluetoothInputDevice(1, 0.1)
-            assert.is_nil(path)
-        end)
-
-        it("should return the correct new device when multiple initial devices exist", function()
-            local call_count = 0
-
-            handler.detectBluetoothInputDevices = function()
-                call_count = call_count + 1
-
-                if call_count == 1 then
-                    return { "/dev/input/event4", "/dev/input/event5" } -- Initial: 2 devices
-                else
-                    return { "/dev/input/event4", "/dev/input/event5", "/dev/input/event6" } -- +1 new
-                end
-            end
-
-            local path = handler:waitForBluetoothInputDevice(3, 0.1)
-            assert.are.equal("/dev/input/event6", path) -- Should return event6, not event4 or event5
-        end)
+        end
     end)
 
-    describe("openIsolatedInputDevice", function()
-        local device_info
-
-        before_each(function()
-            device_info = {
-                address = "AA:BB:CC:DD:EE:FF",
-                name = "Test Device",
-            }
-        end)
-
-        it("should use name matching as primary strategy", function()
-            local name_match_called = false
-
-            handler.findDeviceByName = function(self, name)
-                name_match_called = true
-
-                return "/dev/input/event5"
-            end
-
-            handler:openIsolatedInputDevice(device_info, false, false)
-
-            assert.is_true(name_match_called)
-        end)
-
-        it("should fall back to auto-detection when name matching fails", function()
-            local auto_detect_called = false
-
-            handler.findDeviceByName = function()
-                return nil -- Name matching fails
-            end
-
-            handler._autoDetectInputDevice = function()
-                auto_detect_called = true
-
-                return "/dev/input/event4"
-            end
-
-            handler:openIsolatedInputDevice(device_info, false, false)
-
-            assert.is_true(auto_detect_called)
-        end)
-
-        it("should register callbacks with the isolated reader", function()
-            handler.findDeviceByName = function()
-                return "/dev/input/event4"
-            end
-
-            handler:registerKeyEventCallback(function() end)
-
-            handler:openIsolatedInputDevice(device_info, false, false)
-
-            -- Check that reader was created and has callbacks
-            assert.is_not_nil(handler.isolated_readers["AA:BB:CC:DD:EE:FF"])
-            local reader = handler.isolated_readers["AA:BB:CC:DD:EE:FF"].reader
-            assert.is_not_nil(reader)
-            assert.is_true(#reader.callbacks > 0)
-        end)
+    after_each(function()
+        io.popen = original_popen
+        io_mock.uninstall()
+        io_mock.clear()
     end)
 
-    describe("closeIsolatedInputDevice", function()
-        it("should close and remove the isolated reader", function()
-            local device_info = {
-                address = "AA:BB:CC:DD:EE:FF",
-                name = "Test Device",
-            }
+    it("binds before finding a verified node for the direct connect loop", function()
+        local bound_for = {}
+        handler._bindUnclaimedHidDevices = function(_, address)
+            table.insert(bound_for, address)
+            node("/dev/input/event5", "0005:0001:0001.0001", remote.address)
 
-            handler.findDeviceByName = function()
-                return "/dev/input/event4"
-            end
+            return 0
+        end
 
-            handler:openIsolatedInputDevice(device_info, false, false)
-            assert.is_not_nil(handler.isolated_readers["AA:BB:CC:DD:EE:FF"])
-
-            handler:closeIsolatedInputDevice(device_info)
-            assert.is_nil(handler.isolated_readers["AA:BB:CC:DD:EE:FF"])
-        end)
+        assert.are.equal("/dev/input/event5", handler:findInputNodeForDevice(remote))
+        assert.are.same({ remote.address }, bound_for)
+        assert.is_nil(handler:findInputNodeForDevice(other))
+        assert.is_nil(handler:findInputNodeForDevice({}))
+        assert.is_nil(handler:findInputNodeForDevice(nil))
     end)
 
-    describe("hasIsolatedReaders", function()
-        it("should return false when no readers are open", function()
-            assert.is_false(handler:hasIsolatedReaders())
-        end)
+    it("opens every verified collection through the direct connect path", function()
+        node("/dev/input/event5", "0005:0001:0001.0001", remote.address)
+        node("/dev/input/event6", "0005:0001:0001.0001", "")
+        local bluetooth = require("src/kobo_bluetooth"):new()
+        bluetooth.input_handler = handler
+        bluetooth.device_manager = {
+            getDevices = function()
+                return { { address = remote.address, name = remote.name, paired = true } }
+            end,
+            updateDeviceProperties = function() end,
+        }
+        bluetooth.plugin = { settings = {} }
+        bluetooth.last_seen_rssi = {}
 
-        it("should return true when readers are open", function()
-            local device_info = {
-                address = "AA:BB:CC:DD:EE:FF",
-                name = "Test Device",
-            }
-
-            handler.findDeviceByName = function()
-                return "/dev/input/event4"
-            end
-
-            handler:openIsolatedInputDevice(device_info, false, false)
-            assert.is_true(handler:hasIsolatedReaders())
-        end)
+        assert.are.same({}, bluetooth:_openPresentInputNodes())
+        assert.is_not_nil(handler:getIsolatedReader(remote.address, "/dev/input/event5"))
+        assert.is_not_nil(handler:getIsolatedReader(remote.address, "/dev/input/event6"))
     end)
 
-    describe("pollIsolatedReaders", function()
-        it("should clean up disconnected readers and invoke callbacks", function()
-            -- Setup: open a device and mock its reader
-            local device_info = { address = "AA:BB:CC:DD:EE:FF", name = "Test Device" }
-            handler.findDeviceByName = function()
-                return "/dev/input/event4"
-            end
-            handler:openIsolatedInputDevice(device_info, false, false)
+    it("names the device in the ready notification", function()
+        node("/dev/input/event5", "0005:0001:0001.0001", remote.address)
+        assert.is_true(handler:openIsolatedInputDevice(remote, true))
+        local ui = require("ui/uimanager")
 
-            -- Verify reader was created
-            assert.is_not_nil(handler.isolated_readers["AA:BB:CC:DD:EE:FF"])
+        assert.are.equal(remote.name .. " ready", ui._show_calls[#ui._show_calls].text)
+    end)
 
-            -- Mock the reader as closed
-            local reader = handler.isolated_readers["AA:BB:CC:DD:EE:FF"].reader
-            reader.isOpen = function()
+    it("opens every matching collection but no collection of another remote", function()
+        node("/dev/input/event5", "0005:0001:0001.0001", remote.address)
+        node("/dev/input/event6", "0005:0001:0001.0001", "")
+        node("/dev/input/event7", "0005:0001:0001.0002", other.address)
+
+        assert.is_true(handler:openIsolatedInputDevice(remote, false))
+        assert.is_not_nil(handler:getIsolatedReader(remote.address, "/dev/input/event5"))
+        assert.is_not_nil(handler:getIsolatedReader(remote.address, "/dev/input/event6"))
+        assert.is_nil(handler:getIsolatedReader(remote.address, "/dev/input/event7"))
+        assert.is_nil(handler.isolated_readers[other.address])
+    end)
+
+    it("accepts reversed MTK addresses and HID_UNIQ when input uniq is absent", function()
+        node("/dev/input/event8", "0005:0001:0001.0001", nil, "ff:ee:dd:cc:bb:aa")
+
+        assert.is_true(handler:openIsolatedInputDevice(remote, false))
+        assert.is_not_nil(handler:getIsolatedReader(remote.address))
+    end)
+
+    it("does not attach a sibling with an explicit conflicting address", function()
+        node("/dev/input/event5", "0005:0001:0001.0001", remote.address)
+        node("/dev/input/event6", "0005:0001:0001.0001", other.address)
+
+        handler:openIsolatedInputDevice(remote, false)
+        assert.is_nil(handler:getIsolatedReader(remote.address, "/dev/input/event6"))
+    end)
+
+    it("rejects unidentified nodes instead of falling back to event4", function()
+        node("/dev/input/event4", "0005:0001:0001.0001", "")
+        node("/dev/input/event5", "0005:0001:0001.0002", other.address)
+
+        assert.is_false(handler:openIsolatedInputDevice(remote, false))
+        assert.is_nil(next(handler.isolated_readers))
+    end)
+
+    it("keeps same-model remotes separate and transfers reused paths safely", function()
+        node("/dev/input/event5", "0005:0001:0001.0001", remote.address)
+        node("/dev/input/event6", "0005:0001:0001.0002", other.address)
+        handler:openIsolatedInputDevice(remote, false)
+        handler:openIsolatedInputDevice(other, false)
+        local first = handler:getIsolatedReader(remote.address)
+        assert.is_not_nil(handler:getIsolatedReader(other.address, "/dev/input/event6"))
+        assert.is_nil(handler:getIsolatedReader(other.address, "/dev/input/event5"))
+        node("/dev/input/event5", "0005:0001:0001.0002", other.address)
+        handler:openIsolatedInputDevice(other, false)
+
+        assert.is_false(first:isOpen())
+        assert.is_nil(handler.isolated_readers[remote.address])
+        assert.is_not_nil(handler:getIsolatedReader(other.address, "/dev/input/event5"))
+    end)
+
+    it("rejects non-Bluetooth uhid devices", function()
+        node("/dev/input/event5", "0003:0001:0001.0001", remote.address)
+        assert.is_false(handler:openIsolatedInputDevice(remote, false))
+    end)
+
+    it("keeps readers and callbacks idempotent while adding a late collection", function()
+        node("/dev/input/event5", "0005:0001:0001.0001", remote.address)
+        local opened = {}
+        handler:registerDeviceOpenCallback(function(address, path)
+            table.insert(opened, { address, path })
+        end)
+        handler:openIsolatedInputDevice(remote, false)
+        local first = handler:getIsolatedReader(remote.address)
+        node("/dev/input/event6", "0005:0001:0001.0001", remote.address)
+        handler:openIsolatedInputDevice(remote, false)
+        handler:openIsolatedInputDevice(remote, false)
+
+        assert.are.equal(first, handler:getIsolatedReader(remote.address, "/dev/input/event5"))
+        assert.are.equal(2, #opened)
+    end)
+
+    it("reopens a reused event path when its HID parent changes", function()
+        node("/dev/input/event5", "0005:0001:0001.0001", remote.address)
+        handler:openIsolatedInputDevice(remote, false)
+        local first = handler:getIsolatedReader(remote.address)
+        node("/dev/input/event5", "0005:0001:0001.0002", remote.address)
+        handler:openIsolatedInputDevice(remote, false)
+
+        assert.is_false(first:isOpen())
+        assert.are_not.equal(first, handler:getIsolatedReader(remote.address))
+    end)
+
+    it("keeps successful collections if another reader cannot be opened", function()
+        node("/dev/input/event5", "0005:0001:0001.0001", remote.address)
+        node("/dev/input/event6", "0005:0001:0001.0001", remote.address)
+        local original_open = Reader.open
+        local stub_open = stub(Reader, "open", function(self, path)
+            if path == "/dev/input/event6" then
                 return false
             end
 
-            -- Register a callback to track invocations
-            local callback_invoked = false
-            local callback_address = nil
-            local callback_path = nil
-            handler:registerDeviceCloseCallback(function(addr, path)
-                callback_invoked = true
-                callback_address = addr
-                callback_path = path
-            end)
-
-            -- Act: poll should detect and clean up
-            handler:pollIsolatedReaders(0)
-
-            -- Assert: reader should be removed from table
-            assert.is_nil(handler.isolated_readers["AA:BB:CC:DD:EE:FF"])
-
-            -- Assert: callback should have been invoked with correct parameters
-            assert.is_true(callback_invoked)
-            assert.are.equal("AA:BB:CC:DD:EE:FF", callback_address)
-            assert.are.equal("/dev/input/event4", callback_path)
+            return original_open(self, path)
         end)
 
-        it("should continue cleanup loop when callback throws error", function()
-            -- Setup: open two devices
-            local device1 = { address = "AA:BB:CC:DD:EE:FF", name = "Device 1" }
-            local device2 = { address = "11:22:33:44:55:66", name = "Device 2" }
+        assert.is_true(handler:openIsolatedInputDevice(remote, false))
+        assert.is_not_nil(handler:getIsolatedReader(remote.address, "/dev/input/event5"))
+        assert.is_nil(handler:getIsolatedReader(remote.address, "/dev/input/event6"))
+        stub_open:revert()
+    end)
 
-            local call_count = 0
-            handler.findDeviceByName = function()
-                call_count = call_count + 1
-                if call_count == 1 then
-                    return "/dev/input/event4"
-                else
-                    return "/dev/input/event5"
-                end
-            end
-
-            handler:openIsolatedInputDevice(device1, false, false)
-            handler:openIsolatedInputDevice(device2, false, false)
-
-            -- Mock both readers as closed
-            handler.isolated_readers["AA:BB:CC:DD:EE:FF"].reader.isOpen = function()
-                return false
-            end
-            handler.isolated_readers["11:22:33:44:55:66"].reader.isOpen = function()
+    it("retains later successful nodes after a stale replacement fails", function()
+        node("/dev/input/event5", "0005:0001:0001.0001", remote.address)
+        handler:openIsolatedInputDevice(remote, false)
+        local first = handler:getIsolatedReader(remote.address)
+        node("/dev/input/event5", "0005:0001:0001.0002", remote.address)
+        node("/dev/input/event6", "0005:0001:0001.0002", remote.address)
+        local original_open = Reader.open
+        local live_on_close = false
+        handler:registerDeviceCloseCallback(function()
+            live_on_close = handler:getIsolatedReader(remote.address, "/dev/input/event6") ~= nil
+        end)
+        local failing = stub(Reader, "open", function(self, path)
+            if path == "/dev/input/event5" then
                 return false
             end
 
-            -- Register two callbacks: first throws error, second succeeds
-            local callback1_invoked = false
-            local callback2_invoked = false
-
-            handler:registerDeviceCloseCallback(function(addr, path)
-                callback1_invoked = true
-                error("Simulated callback error")
-            end)
-
-            handler:registerDeviceCloseCallback(function(addr, path)
-                callback2_invoked = true
-            end)
-
-            -- Act: poll should handle errors gracefully
-            handler:pollIsolatedReaders(0)
-
-            -- Assert: both readers should be removed despite callback error
-            assert.is_nil(handler.isolated_readers["AA:BB:CC:DD:EE:FF"])
-            assert.is_nil(handler.isolated_readers["11:22:33:44:55:66"])
-
-            -- Assert: both callbacks should have been attempted
-            assert.is_true(callback1_invoked)
-            assert.is_true(callback2_invoked)
+            return original_open(self, path)
         end)
+        assert.is_true(handler:openIsolatedInputDevice(remote, false))
+        assert.is_false(first:isOpen())
+        assert.is_not_nil(handler:getIsolatedReader(remote.address, "/dev/input/event6"))
+        assert.is_true(live_on_close)
+        failing:revert()
+    end)
 
-        it("should not clean up readers that are still open", function()
-            -- Setup: open a device
-            local device_info = { address = "AA:BB:CC:DD:EE:FF", name = "Test Device" }
-            handler.findDeviceByName = function()
-                return "/dev/input/event4"
+    it("registers and clears key callbacks on every collection", function()
+        node("/dev/input/event5", "0005:0001:0001.0001", remote.address)
+        node("/dev/input/event6", "0005:0001:0001.0001", remote.address)
+        handler:registerKeyEventCallback(function() end)
+        handler:openIsolatedInputDevice(remote, false)
+        handler:registerKeyEventCallback(function() end)
+
+        for _, info in pairs(handler.isolated_readers[remote.address]) do
+            assert.are.equal(2, #info.reader.callbacks)
+        end
+
+        handler:clearKeyEventCallbacks()
+
+        for _, info in pairs(handler.isolated_readers[remote.address]) do
+            assert.are.same({}, info.reader.callbacks)
+        end
+    end)
+
+    it("attributes events from every collection to the correct MAC", function()
+        node("/dev/input/event5", "0005:0001:0001.0001", remote.address)
+        node("/dev/input/event6", "0005:0001:0001.0001", remote.address)
+        handler:openIsolatedInputDevice(remote, false)
+
+        for path, info in pairs(handler.isolated_readers[remote.address]) do
+            info.reader.poll = function()
+                return { { code = 106, value = 1, device_path = path } }
             end
-            handler:openIsolatedInputDevice(device_info, false, false)
+        end
 
-            -- Reader stays open (default behavior, no need to mock)
-            local reader = handler.isolated_readers["AA:BB:CC:DD:EE:FF"].reader
-            assert.is_not_nil(reader)
+        local events = handler:pollIsolatedReaders(0)
+        assert.are.equal(2, #events)
 
-            -- Register callback that should NOT be invoked
-            local callback_invoked = false
-            handler:registerDeviceCloseCallback(function(addr, path)
-                callback_invoked = true
-            end)
+        for _, event in ipairs(events) do
+            assert.are.equal(remote.address, event.device_address)
+        end
+    end)
 
-            -- Act: poll should not clean up open reader
-            handler:pollIsolatedReaders(0)
-
-            -- Assert: reader should still be present
-            assert.is_not_nil(handler.isolated_readers["AA:BB:CC:DD:EE:FF"])
-
-            -- Assert: callback should NOT have been invoked
-            assert.is_false(callback_invoked)
+    it("does not mark a remote disconnected until its last collection closes", function()
+        node("/dev/input/event5", "0005:0001:0001.0001", remote.address)
+        node("/dev/input/event6", "0005:0001:0001.0001", remote.address)
+        handler:openIsolatedInputDevice(remote, false)
+        local KoboBluetooth = require("src/kobo_bluetooth")
+        local updates = {}
+        local bluetooth = {
+            plugin = { settings = {} },
+            input_handler = handler,
+            device_manager = {
+                updateDeviceProperties = function(_, address, properties)
+                    table.insert(updates, { address, properties })
+                end,
+            },
+        }
+        local closed = {}
+        handler:registerDeviceCloseCallback(function(address, path)
+            table.insert(closed, path)
+            KoboBluetooth.onInputDeviceClosed(bluetooth, address, path)
         end)
+        handler:getIsolatedReader(remote.address, "/dev/input/event5"):close()
+        handler:pollIsolatedReaders(0)
+
+        assert.are.equal(0, #updates)
+        assert.are.equal(1, #closed)
+        assert.is_true(handler:hasIsolatedReaders())
+        handler:getIsolatedReader(remote.address, "/dev/input/event6"):close()
+        handler:pollIsolatedReaders(0)
+
+        assert.are.equal(1, #updates)
+        assert.are.equal(2, #closed)
+        assert.is_false(handler:hasIsolatedReaders())
+        assert.is_nil(handler.isolated_readers[remote.address])
+    end)
+
+    it("closes every collection even when a close callback fails", function()
+        node("/dev/input/event5", "0005:0001:0001.0001", remote.address)
+        node("/dev/input/event6", "0005:0001:0001.0001", remote.address)
+        handler:openIsolatedInputDevice(remote, false)
+        local first = handler:getIsolatedReader(remote.address)
+        local count = 0
+        handler:registerDeviceCloseCallback(function()
+            error("callback error")
+        end)
+        handler:registerDeviceCloseCallback(function()
+            count = count + 1
+        end)
+        handler:closeAllIsolatedInputDevices()
+
+        assert.are.equal(2, count)
+        assert.is_false(first:isOpen())
+        assert.is_nil(next(handler.isolated_readers))
     end)
 end)
 
@@ -551,108 +456,5 @@ describe("InputDeviceHandler hid-generic binding", function()
         })
 
         assert.are.equal(0, handler:_bindUnclaimedHidDevices("1D:01:FF:5A:0E:F6"))
-    end)
-end)
-
-describe("InputDeviceHandler input node matching by address", function()
-    local InputDeviceHandler
-    local UIManager
-    local handler
-
-    local RING_A = "1D:01:FF:5A:0E:F6"
-    local RING_B = "B7:55:EF:E0:3C:EA"
-
-    -- sysfs uniq values of three nodes: two rings (reversed byte order, as on MTK) and a device without one
-    local uniq = {
-        ["/dev/input/event3"] = "F6:0E:5A:FF:01:1D",
-        ["/dev/input/event4"] = "EA:3C:E0:EF:55:B7",
-        ["/dev/input/event5"] = "",
-    }
-
-    setup(function()
-        require("spec/helper")
-        InputDeviceHandler = require("src/lib/bluetooth/input_device_handler")
-        UIManager = require("ui/uimanager")
-    end)
-
-    before_each(function()
-        handler = InputDeviceHandler:new()
-        handler.detectBluetoothInputDevices = function()
-            return { "/dev/input/event3", "/dev/input/event4", "/dev/input/event5" }
-        end
-        handler._getDeviceName = function()
-            return "WX02"
-        end
-        handler._getDeviceUniq = function(_, path)
-            return uniq[path]
-        end
-    end)
-
-    it("should match a node by its uniq in either byte order", function()
-        assert.are.equal("/dev/input/event3", handler:findDeviceByName("WX02", RING_A))
-        assert.are.equal("/dev/input/event4", handler:findDeviceByName("WX02", RING_B))
-    end)
-
-    it("should fall back to the name for a node without uniq", function()
-        assert.are.equal("/dev/input/event5", handler:findDeviceByName("WX02", "AA:AA:AA:AA:AA:AA"))
-        assert.is_nil(handler:findDeviceByName("Other", "AA:AA:AA:AA:AA:AA"))
-    end)
-
-    it("should match by name alone when no address is given", function()
-        assert.are.equal("/dev/input/event3", handler:findDeviceByName("WX02"))
-    end)
-
-    it("should never hand a node in use to another device of the same name", function()
-        handler.isolated_readers[RING_A] = {
-            device_path = "/dev/input/event3",
-            reader = {
-                isOpen = function()
-                    return true
-                end,
-            },
-        }
-
-        assert.are.equal("/dev/input/event4", handler:findDeviceByName("WX02"))
-        assert.are.equal("/dev/input/event4", handler:findDeviceByName("WX02", RING_B))
-    end)
-
-    it("should read the uniq from sysfs", function()
-        local files = {
-            ["/sys/class/input/event3/device/uniq"] = "F6:0E:5A:FF:01:1D\n",
-            ["/sys/class/input/event5/device/uniq"] = "\n",
-        }
-        handler._getDeviceUniq = nil
-        handler._readSysfsFile = function(_, path)
-            return files[path]
-        end
-
-        assert.are.equal("F6:0E:5A:FF:01:1D", handler:_getDeviceUniq("/dev/input/event3"))
-        assert.are.equal("", handler:_getDeviceUniq("/dev/input/event5"))
-        assert.is_nil(handler:_getDeviceUniq("/dev/input/event7"))
-        assert.is_nil(handler:_getDeviceUniq("invalid"))
-    end)
-
-    it("should bind the device and match its node in findInputNodeForDevice", function()
-        local bound_for = {}
-        handler._bindUnclaimedHidDevices = function(_, address)
-            table.insert(bound_for, address)
-
-            return 0
-        end
-
-        local path = handler:findInputNodeForDevice({ address = RING_A, name = "WX02" })
-
-        assert.are.equal("/dev/input/event3", path)
-        assert.are.same({ RING_A }, bound_for)
-        assert.is_nil(handler:findInputNodeForDevice({ address = "AA:AA:AA:AA:AA:AA", name = "Other" }))
-    end)
-
-    it("should name the device in the ready notification", function()
-        UIManager:_reset()
-
-        assert.is_true(handler:openIsolatedInputDevice({ address = RING_A, name = "WX02" }, true, false))
-
-        local last_message = UIManager._show_calls[#UIManager._show_calls]
-        assert.are.equal("WX02 ready", last_message.text)
     end)
 end)

@@ -1505,6 +1505,11 @@ function KoboBluetooth:onInputDeviceClosed(device_address, device_path)
         return
     end
 
+    -- A remote can expose several HID collections. Losing one is not a disconnect.
+    if self.input_handler.isolated_readers[device_address] then
+        return
+    end
+
     self.device_manager:updateDeviceProperties(device_address, { Connected = false })
 
     local has_connected_device = next(self.input_handler.isolated_readers) ~= nil

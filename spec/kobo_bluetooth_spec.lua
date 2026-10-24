@@ -4740,14 +4740,18 @@ object path "/org/bluez/hci0/dev_00_11_22_33_44_55"
                     return true
                 end
 
-                instance.input_handler.findInputNodeForDevice = function(handler, device)
-                    local path = "/dev/input/" .. device.address
-
-                    if nodes[device.address] and not handler:_isPathInUse(path) then
-                        return path
+                instance.input_handler.findInputDevices = function(_, device)
+                    if nodes[device.address] then
+                        return {
+                            {
+                                path = "/dev/input/" .. device.address,
+                                hid_parent = device.address,
+                                uniq = device.address,
+                            },
+                        }
                     end
 
-                    return nil
+                    return {}
                 end
 
                 UIManager:_reset()
