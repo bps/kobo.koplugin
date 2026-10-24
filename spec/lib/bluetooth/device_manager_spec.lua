@@ -2,6 +2,7 @@
 -- Unit tests for DeviceManager module.
 
 require("spec.helper")
+local time = require("ui/time")
 
 describe("DeviceManager", function()
     local DeviceManager
@@ -158,77 +159,184 @@ object path "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"
     end)
 
     describe("connectDevice", function()
-        it("should show success message on successful connection", function()
-            setMockExecuteResult(0)
+        local device, manager
 
-            local device = {
+        local function liveState(connected)
+            setMockPopenOutput([[
+object path "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"
+  string "Address"
+    variant string "AA:BB:CC:DD:EE:FF"
+  string "Name"
+    variant string "Test Device"
+  string "Paired"
+    variant boolean true
+  string "Connected"
+    variant boolean ]] .. tostring(connected))
+        end
+
+        before_each(function()
+            device = {
                 path = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
                 name = "Test Device",
                 address = "AA:BB:CC:DD:EE:FF",
             }
+            manager = DeviceManager:new()
+            liveState(true)
+        end)
 
-            local manager = DeviceManager:new()
-            local result = manager:connectDevice(device)
+        after_each(function()
+            manager:cancelConnection()
+        end)
 
-            assert.is_true(result)
+        it("returns before notifying or opening input devices", function()
+            local callback = spy.new(function() end)
+            assert.is_true(manager:connectDevice(device, callback))
+            assert.spy(callback).was_not_called()
+            assert.are.equal(0, #UIManager._show_calls)
+            UIManager:executeScheduledTasks(1)
+            assert.spy(callback).was_called_with(device)
             assert.are.equal(1, #UIManager._show_calls)
+            assert.is_true(manager.devices_cache[device.address].connected)
         end)
 
-        it("should call on_success callback after connection", function()
-            setMockExecuteResult(0)
-
-            local device = {
-                path = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
-                name = "Test Device",
-                address = "AA:BB:CC:DD:EE:FF",
-            }
-
-            local callback_called = false
-            local callback_device = nil
-
-            local manager = DeviceManager:new()
-            manager:connectDevice(device, function(dev)
-                callback_called = true
-                callback_device = dev
-            end)
-
-            assert.is_true(callback_called)
-            assert.are.equal(device, callback_device)
+        it("verifies live state rather than trusting a successful method reply", function()
+            liveState(false)
+            local callback = spy.new(function() end)
+            assert.is_true(manager:connectDevice(device, callback))
+            UIManager:executeScheduledTasks(1)
+            assert.spy(callback).was_not_called()
+            assert.is_true(UIManager._show_calls[1].text:match("Failed") ~= nil)
         end)
 
-        it("should show error message on failed connection", function()
+        it("accepts an AlreadyConnected-style method error when live state is connected", function()
             setMockExecuteResult(1)
+            local callback = spy.new(function() end)
+            manager:connectDevice(device, callback)
+            UIManager:executeScheduledTasks(1)
+            assert.spy(callback).was_called(1)
+        end)
 
-            local device = {
-                path = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
-                name = "Test Device",
-                address = "AA:BB:CC:DD:EE:FF",
-            }
+        it("serializes attempts across all remotes", function()
+            manager:connectDevice(device)
+            assert.is_false(manager:connectDevice(device))
+            assert.is_false(manager:connectDevice({
+                path = "/org/bluez/hci0/dev_11_22_33_44_55_66",
+                address = "11:22:33:44:55:66",
+            }))
+            UIManager:executeScheduledTasks(1)
+            assert.is_true(manager:connectDevice(device))
+        end)
 
-            local manager = DeviceManager:new()
-            local result = manager:connectDevice(device)
+        it("throttles automatic retries after failure but permits an explicit retry", function()
+            liveState(false)
+            manager:connectDevice(device, nil, true)
+            UIManager:executeScheduledTasks(1)
+            assert.is_false(manager:connectDevice(device, nil, true))
+            assert.is_true(manager:connectDevice(device))
+        end)
 
-            assert.is_false(result)
+        it("allows automatic retries after the cooldown expires", function()
+            liveState(false)
+            manager:connectDevice(device, nil, true)
+            UIManager:executeScheduledTasks(1)
+            local clock = stub(time, "now", function()
+                return manager.connection_cooldowns[device.address] + time.s(1)
+            end)
+            assert.is_true(manager:connectDevice(device, nil, true))
+            clock:revert()
+        end)
+
+        it("does not call stale completion callbacks after cleanup", function()
+            local callback = spy.new(function() end)
+            manager:connectDevice(device, callback)
+            local attempt = manager.connection_attempt
+            local stale = attempt.poll
+            manager:cancelConnection()
+            stale()
+            UIManager:executeScheduledTasks(1)
+            assert.spy(callback).was_not_called()
+            assert.is_false(attempt.active)
+            assert.is_nil(manager.connection_attempt)
+            assert.are.equal(0, #UIManager._show_calls)
+        end)
+
+        it("handles subprocess startup failure without leaving an active slot", function()
+            setMockRunInSubProcessResult(false)
+            assert.is_false(manager:connectDevice(device))
+            assert.is_nil(manager.connection_attempt)
+            assert.is_nil(manager.connection_token)
+        end)
+
+        it("times out a child that never produces a result", function()
+            local ffiutil = require("ffi/util")
+            local unreadable = stub(ffiutil, "getNonBlockingReadSize", function()
+                return 0
+            end)
+            local callback = spy.new(function() end)
+            manager:connectDevice(device, callback)
+            UIManager:executeScheduledTasks(150)
+            assert.spy(callback).was_not_called()
+            assert.is_nil(manager.connection_attempt)
+            assert.is_nil(next(UIManager._scheduled_tasks))
             assert.are.equal(1, #UIManager._show_calls)
+            unreadable:revert()
         end)
 
-        it("should not call on_success callback on failed connection", function()
-            setMockExecuteResult(1)
-
-            local device = {
-                path = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
-                name = "Test Device",
-                address = "AA:BB:CC:DD:EE:FF",
-            }
-
-            local callback_called = false
-
-            local manager = DeviceManager:new()
-            manager:connectDevice(device, function()
-                callback_called = true
+        it("uses an available verified result even when completion polling is delayed", function()
+            local callback = spy.new(function() end)
+            manager:connectDevice(device, callback)
+            local clock = stub(time, "now", function()
+                return 9999999999
             end)
+            UIManager:executeScheduledTasks(1)
+            clock:revert()
+            assert.spy(callback).was_called(1)
+            assert.is_nil(manager.connection_attempt)
+        end)
 
-            assert.is_false(callback_called)
+        it("does not verify another device's connection as success", function()
+            setMockPopenOutput([[
+object path "/org/bluez/hci0/dev_11_22_33_44_55_66"
+  string "Address"
+    variant string "11:22:33:44:55:66"
+  string "Connected"
+    variant boolean true
+]])
+            local callback = spy.new(function() end)
+            manager:connectDevice(device, callback)
+            UIManager:executeScheduledTasks(1)
+            assert.spy(callback).was_not_called()
+        end)
+
+        it("does not burn the cooldown when no attempt can start", function()
+            setMockRunInSubProcessResult(false)
+            assert.is_false(manager:connectDevice(device, nil, true))
+            assert.is_nil(manager.connection_cooldowns[device.address])
+            setMockRunInSubProcessResult(12345)
+            assert.is_true(manager:connectDevice(device, nil, true))
+        end)
+
+        it("does not cancel a connection when disconnecting a different remote", function()
+            local callback = spy.new(function() end)
+            manager:connectDevice(device, callback)
+            manager:disconnectDevice({
+                address = "11:22:33:44:55:66",
+                path = "/org/bluez/hci0/dev_11_22_33_44_55_66",
+                name = "Another remote",
+            })
+            assert.is_not_nil(manager.connection_attempt)
+            UIManager:executeScheduledTasks(1)
+            assert.spy(callback).was_called(1)
+        end)
+
+        it("reports completion once even if a scheduled callback runs again", function()
+            local callback = spy.new(function() end)
+            manager:registerDeviceConnectCallback(callback)
+            manager:connectDevice(device)
+            local poll = manager.connection_attempt.poll
+            poll()
+            poll()
+            assert.spy(callback).was_called(1)
         end)
     end)
 
@@ -303,7 +411,10 @@ object path "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"
                 connect_called = true
             end)
 
-            assert.is_true(connect_called)
+            assert.is_false(connect_called)
+            setMockPopenOutput("") -- The child already captured state; inspect the async attempt.
+            assert.is_not_nil(manager.connection_attempt)
+            manager:cancelConnection()
         end)
 
         it("should disconnect when device is connected", function()

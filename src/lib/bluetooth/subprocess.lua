@@ -46,13 +46,16 @@ end
 --- (platform/kobo/koreader.sh relocates itself off the onboard partition for
 --- USB mass storage, platform/kobo/enable-wifi.sh closes every inherited fd).
 --- stdin/stdout/stderr are kept so the child can still log.
-function Subprocess.detachFromStorage()
+--- @param keep_fd number|nil Optional result pipe to retain
+function Subprocess.detachFromStorage(keep_fd)
     if C.chdir(Subprocess.WORKING_DIRECTORY) ~= 0 then
         logger.warn("Subprocess: chdir", Subprocess.WORKING_DIRECTORY, "failed, errno:", ffi.errno())
     end
 
     for fd = 3, Subprocess.openFileLimit() - 1 do
-        C.close(fd)
+        if fd ~= keep_fd then
+            C.close(fd)
+        end
     end
 end
 

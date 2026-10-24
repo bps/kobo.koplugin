@@ -37,6 +37,14 @@ local function getAdapter()
 end
 
 ---
+--- Resolves the adapter before a child detaches from KOReader's working directory.
+--- This does not contact D-Bus or power the radio.
+--- @return boolean True if this device has an adapter
+function DbusAdapter.prepare()
+    return getAdapter() ~= nil
+end
+
+---
 --- Executes D-Bus commands via shell.
 --- @param commands table Array of command strings to execute.
 --- @return boolean True if all commands succeeded, false otherwise.

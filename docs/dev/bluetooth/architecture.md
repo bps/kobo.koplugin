@@ -140,6 +140,38 @@ On hardware, verify every button after reconnecting and after suspend/resume, in
 where event numbers change. If a device has no usable `uniq` or `HID_UNIQ`, collect its sysfs
 identity before adding a fallback. Do not infer ownership from a shared model name.
 
+## Bounded connection lifecycle
+
+`DeviceManager:connectDevice` returns whether an attempt was started, not whether the remote is
+connected. Its success callback runs later, after a live `Connected` property check. A successful
+method exit alone is insufficient, and an `AlreadyConnected` error is harmless if live state
+confirms the connection.
+
+Connect and state verification run in a double-forked subprocess with a one-byte result pipe.
+KOReader polls that pipe without waiting on D-Bus. The child retains only its result pipe and
+standard streams, so it does not pin onboard storage during USB mass-storage transitions. Connect
+has a 10-second reply timeout; verification has a one-second timeout. The UI stops tracking the
+attempt after at most 13 seconds or 130 polls.
+
+Only one attempt can run at a time, including across manager instances. Automatic retries have a
+15-second per-address cooldown. Deadlines use KOReader's monotonic clock, not the network-adjusted
+wall clock. A rejected start does not consume the cooldown. Cancellation invalidates callbacks and
+closes the result pipe, but does not cancel the stack's own in-flight Connect. The global
+reservation remains until the attempt deadline to prevent an immediate overlapping retry.
+
+Input discovery scans every 200 ms for at most 25 polls. It continues after the first collection
+appears, so late sibling collections are included. Close, suspend and shutdown cancel these scans;
+stale scheduled callbacks cannot reopen readers. Bluetooth cleanup suppresses close-triggered
+reconnection. Scheduling discovery is not input readiness: detection stops only after a collection
+actually opens.
+
+Automatic discovery stops after 60 seconds even if no remote connects. Repeated starts do not extend
+an active window. Passive D-Bus connection detection remains a separate setting.
+
+Hardware verification should cover an unavailable remote, repeated suspend/resume, late input nodes,
+Wi-Fi initially on and off, and USB storage while a connection attempt is pending. Unit tests mock
+D-Bus and subprocess execution; they do not verify MTK driver behavior.
+
 ## See Also
 
 - [Interface Contract](https://github.com/ogkevin/kobo.koplugin/blob/main/src/lib/bluetooth/dbus_adapter_interface.lua) -

@@ -10,7 +10,6 @@ local BluetoothInputReader = require("src/lib/bluetooth/bluetooth_input_reader")
 local InfoMessage = require("ui/widget/infomessage")
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
-local ffiutil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 
@@ -40,8 +39,9 @@ InputDeviceHandler.HID_GROUPS_MULTITOUCH = { ["0002"] = true, ["0100"] = true }
 --- Sysfs file that makes hid-generic claim an additional device ID.
 InputDeviceHandler.HID_GENERIC_NEW_ID = "/sys/bus/hid/drivers/hid-generic/new_id"
 
---- Time the kernel needs to create the input node after hid-generic took a device.
-InputDeviceHandler.HID_BIND_SETTLE_SECONDS = 0.3
+--- Scan for up to five seconds, including late sibling collections.
+InputDeviceHandler.INPUT_SCAN_INTERVAL = 0.2
+InputDeviceHandler.INPUT_SCAN_MAX_POLLS = 25
 
 ---
 --- Creates a new InputDeviceHandler instance.
@@ -56,6 +56,7 @@ function InputDeviceHandler:new()
     instance.device_open_callbacks = {}
     instance.device_close_callbacks = {}
     instance.hid_bind_attempts = {}
+    instance.pending_input_scans = {}
 
     return instance
 end
@@ -136,8 +137,8 @@ end
 --- Only a device that meets all of these is touched: on the Bluetooth bus,
 --- without a driver, in a multitouch HID group and, when an address is given,
 --- carrying that address, i.e. the paired device the plugin was asked to open.
---- Everything else is left to the kernel. After a bind this waits
---- HID_BIND_SETTLE_SECONDS so the node exists when the caller looks for it.
+--- Everything else is left to the kernel. Scheduled input scans allow time for
+--- the node to appear without sleeping on the UI thread.
 --- @param device_address string|nil Bluetooth address of the device to bind; any matching device when nil
 --- @return number Number of devices handed to hid-generic
 function InputDeviceHandler:_bindUnclaimedHidDevices(device_address)
@@ -155,10 +156,6 @@ function InputDeviceHandler:_bindUnclaimedHidDevices(device_address)
         if self:_isBindableHidDevice(entry, hid_path, device_address) and self:_bindToHidGeneric(entry, hid_path) then
             bound = bound + 1
         end
-    end
-
-    if bound > 0 then
-        ffiutil.sleep(InputDeviceHandler.HID_BIND_SETTLE_SECONDS)
     end
 
     return bound
@@ -364,26 +361,60 @@ function InputDeviceHandler:findInputNodeForDevice(device_info)
     return devices[1] and devices[1].path
 end
 
----
---- Waits for verified input collections to appear after a connection.
---- @param device_info table Device information with address
---- @param timeout number Maximum seconds to wait (default: 5)
---- @return table Array of verified input identities
-function InputDeviceHandler:waitForBluetoothInputDevice(device_info, timeout)
-    local start_time = os.time()
+--- Schedules bounded node discovery, including late sibling collections.
+--- Pending scan identity invalidates stale callbacks after close or suspend.
+--- @param device_info table Bluetooth device
+--- @param show_messages boolean Whether to report input readiness
+--- @param ready boolean Whether inputs are already open
+function InputDeviceHandler:_scheduleInputScan(device_info, show_messages, ready)
+    local address = device_info.address
 
-    while os.time() - start_time < (timeout or 5) do
-        self:_bindUnclaimedHidDevices(device_info.address)
-        local devices = self:findInputDevices(device_info)
-
-        if #devices > 0 then
-            return devices
-        end
-
-        ffiutil.sleep(0.2)
+    if self.pending_input_scans[address] then
+        return
     end
 
-    return {}
+    local polls = 0
+    local scan
+
+    scan = function()
+        if self.pending_input_scans[address] ~= scan then
+            return
+        end
+
+        polls = polls + 1
+        local opened = self:openIsolatedInputDevice(device_info, show_messages ~= false and not ready, false)
+        ready = ready or opened
+
+        if polls >= InputDeviceHandler.INPUT_SCAN_MAX_POLLS then
+            self.pending_input_scans[address] = nil
+
+            if not ready and show_messages ~= false then
+                UIManager:show(InfoMessage:new({
+                    text = _("Bluetooth input device not found.\nYou may need to reconnect the device."),
+                    timeout = 3,
+                }))
+            end
+
+            return
+        end
+
+        UIManager:scheduleIn(InputDeviceHandler.INPUT_SCAN_INTERVAL, scan)
+    end
+
+    self.pending_input_scans[address] = scan
+    UIManager:scheduleIn(InputDeviceHandler.INPUT_SCAN_INTERVAL, scan)
+end
+
+---
+--- Cancels node discovery for one remote.
+--- @param address string Bluetooth address
+function InputDeviceHandler:_cancelInputScan(address)
+    local scan = self.pending_input_scans[address]
+    self.pending_input_scans[address] = nil
+
+    if scan then
+        UIManager:unschedule(scan)
+    end
 end
 
 ---
@@ -412,7 +443,8 @@ end
 --- @param device_info table Device information with address
 --- @param show_messages boolean Whether to show UI messages (default: true)
 --- @param wait_for_device boolean Whether to wait for input nodes (default: false)
---- @return boolean True if at least one input reader is open
+--- @return boolean True if inputs are open
+--- @return boolean True if discovery is pending
 function InputDeviceHandler:openIsolatedInputDevice(device_info, show_messages, wait_for_device)
     if not device_info or not device_info.address then
         return false
@@ -420,10 +452,6 @@ function InputDeviceHandler:openIsolatedInputDevice(device_info, show_messages, 
 
     self:_bindUnclaimedHidDevices(device_info.address)
     local devices = self:findInputDevices(device_info)
-
-    if #devices == 0 and wait_for_device then
-        devices = self:waitForBluetoothInputDevice(device_info)
-    end
 
     local readers = self.isolated_readers[device_info.address] or {}
     self.isolated_readers[device_info.address] = readers
@@ -484,17 +512,21 @@ function InputDeviceHandler:openIsolatedInputDevice(device_info, show_messages, 
         self:_notifyInputCallbacks(self.device_close_callbacks, device_info.address, path)
     end
 
+    if wait_for_device then
+        self:_scheduleInputScan(device_info, show_messages, next(readers) ~= nil)
+    end
+
     if not next(readers) then
         self.isolated_readers[device_info.address] = nil
 
-        if show_messages ~= false then
+        if show_messages ~= false and not self.pending_input_scans[device_info.address] then
             UIManager:show(InfoMessage:new({
                 text = _("Bluetooth input device not found.\nYou may need to reconnect the device."),
                 timeout = 3,
             }))
         end
 
-        return false
+        return false, self.pending_input_scans[device_info.address] ~= nil
     end
 
     if opened > 0 and show_messages ~= false then
@@ -548,6 +580,7 @@ end
 --- Closes every input collection of one remote.
 --- @param device_info table Device information with address
 function InputDeviceHandler:closeIsolatedInputDevice(device_info)
+    self:_cancelInputScan(device_info.address)
     local readers = self.isolated_readers[device_info.address] or {}
     local paths = {}
 
@@ -563,6 +596,13 @@ end
 ---
 --- Closes all isolated Bluetooth input devices.
 function InputDeviceHandler:closeAllIsolatedInputDevices()
+    local pending = self.pending_input_scans
+    self.pending_input_scans = {}
+
+    for _, scan in pairs(pending) do
+        UIManager:unschedule(scan)
+    end
+
     local addresses = {}
 
     for address in pairs(self.isolated_readers) do

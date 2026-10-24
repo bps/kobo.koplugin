@@ -34,12 +34,14 @@ for details on the dispatcher approach.
 
 ### Auto-connect to nearby devices
 
-When enabled, the plugin continuously scans for nearby paired Bluetooth devices in
-discovery/pairing/broadcasting mode. When a paired device comes within range (detected via RSSI
-signal strength), the plugin automatically initiates a connection to that device.
+When enabled, the plugin scans for nearby paired Bluetooth devices in discovery/pairing/broadcasting
+mode for up to 60 seconds. When a paired device comes within range (detected via RSSI signal
+strength), the plugin automatically initiates a connection to that device. Only one connection
+attempt runs at a time, and retries to the same device are limited to one every 15 seconds after an
+attempt finishes.
 
 - **Default:** Disabled
-- **When enabled:** Continuously scans and monitors RSSI for all paired devices
+- **When enabled:** Scans and monitors RSSI for all paired devices for up to 60 seconds
 - **Connection initiation:** The Kobo (not the device) initiates the connection request
 - **Notification:** Shows a notification when a device is auto-connected
 - **Requirements:** Device must be paired, in discovery/broadcasting mode, and not currently
@@ -54,6 +56,11 @@ battery and prevents unnecessary scanning if you typically only use one Bluetoot
 - **Only active when:** "Auto-connect to nearby devices" is enabled
 - **Behavior:** Scanning automatically resumes when a connected device disconnects or when Bluetooth
   is toggled off and back on
+
+The scan window ends after 60 seconds even when no device connects. The setting remains enabled. To
+start another window, toggle auto-connect off and on, or disable and re-enable Bluetooth.
+Auto-detection of connections initiated by the remote is separate and is not stopped by this
+timeout.
 
 ## How It Works
 

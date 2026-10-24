@@ -1711,7 +1711,16 @@ describe("KoboBluetooth", function()
                     instance:startAutoDetectionPolling()
                     assert.is_true(instance.dbus_monitor:hasCallback("kobobluetooth:auto_detection"))
 
-                    -- Simulate device connected callback
+                    -- A connection without an input collection must not stop detection.
+                    instance:onDeviceConnected({ address = "00:11:22:33:44:55", name = "Test Device" })
+                    assert.is_true(instance.dbus_monitor:hasCallback("kobobluetooth:auto_detection"))
+
+                    -- Simulate the input collection becoming ready.
+                    local reader = require("src/lib/bluetooth/bluetooth_input_reader"):new()
+                    reader:open("/dev/input/event5")
+                    instance.input_handler.isolated_readers["00:11:22:33:44:55"] = {
+                        ["/dev/input/event5"] = { reader = reader, hid_parent = "test" },
+                    }
                     instance:onDeviceConnected({ address = "00:11:22:33:44:55", name = "Test Device" })
 
                     -- Auto-detection should have stopped (callbacks unregistered)
@@ -4605,8 +4614,8 @@ object path "/org/bluez/hci0/dev_00_11_22_33_44_55"
                 -- Simulate Bluetooth becoming enabled
                 setMockPopenOutput("variant boolean true")
 
-                -- Execute scheduled tasks to complete async Bluetooth enable
-                UIManager:executeScheduledTasks()
+                -- Complete enable, but do not execute the separate 60-second discovery timeout.
+                UIManager:executeScheduledTasks(1)
 
                 assert.is_true(instance.dbus_monitor:hasCallback("kobobluetooth:auto_connect"))
             end)

@@ -85,6 +85,17 @@ _G.setMockPopenFailure = setMockPopenFailure
 
 -- Helper function to reset all mocks to default state
 function resetAllMocks()
+    local attempts = package.loaded["src/lib/bluetooth/connection_attempt"]
+
+    if attempts then
+        if attempts.current then
+            attempts.current:cancel()
+        end
+
+        attempts.busy_until = 0
+        attempts.current = nil
+    end
+
     _mock_os_execute_result = 0
     _mock_io_popen_output = "variant boolean true"
     _executed_commands = {}
@@ -508,6 +519,20 @@ if not package.preload["ffi/zstd"] then
     end
 end
 
+-- Mock KOReader's monotonic fixed-point clock.
+if not package.preload["ui/time"] then
+    package.preload["ui/time"] = function()
+        return {
+            now = function()
+                return os.clock() * 1000000
+            end,
+            s = function(seconds)
+                return seconds * 1000000
+            end,
+        }
+    end
+end
+
 -- Mock ffi/util module (used for T() template function and subprocess)
 local function setMockRunInSubProcessResult(result)
     _G._mock_run_in_subprocess_result = result
@@ -522,7 +547,28 @@ end
 _G.getMockRunInSubProcessCallback = getMockRunInSubProcessCallback
 if not package.preload["ffi/util"] then
     package.preload["ffi/util"] = function()
+        -- Real pipes exercise the nonblocking IPC code without forking the runner.
+        local ffi = require("ffi")
+        pcall(
+            ffi.cdef,
+            "int pipe(int [2]); int close(int); long read(int, void *, unsigned long); long write(int, const void *, unsigned long);"
+        )
+        local pipes, readable = {}, {}
+
         return {
+            writeToFD = function(fd, data, close_fd)
+                local count = ffi.C.write(fd, data, #data)
+                readable[pipes[fd]] = count
+
+                if close_fd then
+                    ffi.C.close(fd)
+                end
+
+                return count == #data
+            end,
+            getNonBlockingReadSize = function(fd)
+                return readable[fd] or 0
+            end,
             template = function(template_str, ...)
                 local args = { ... }
 
@@ -548,8 +594,21 @@ if not package.preload["ffi/util"] then
             runInSubProcess = function(func, with_pipe, double_fork)
                 _G._mock_run_in_subprocess_callback = func
 
-                -- Execute the subprocess function immediately in test mode
-                -- This allows D-Bus commands and other subprocess operations to be tracked
+                if not _G._mock_run_in_subprocess_result then
+                    return false
+                end
+
+                if with_pipe then
+                    local fds = ffi.new("int[2]")
+                    assert(ffi.C.pipe(fds) == 0)
+                    pipes[tonumber(fds[1])] = tonumber(fds[0])
+                    readable[tonumber(fds[0])] = 0
+                    func(12345, tonumber(fds[1]))
+
+                    return _G._mock_run_in_subprocess_result, tonumber(fds[0])
+                end
+
+                -- Run child code inline for shell-command assertions.
                 if func and type(func) == "function" then
                     func()
                 end

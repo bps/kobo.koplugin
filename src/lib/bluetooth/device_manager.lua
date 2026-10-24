@@ -2,12 +2,14 @@
 --- Bluetooth device management module.
 --- Handles device discovery, connection, and paired device tracking.
 
+local ConnectionAttempt = require("src/lib/bluetooth/connection_attempt")
 local DbusAdapter = require("src/lib/bluetooth/dbus_adapter")
 local DeviceParser = require("src/lib/bluetooth/device_parser")
 local InfoMessage = require("ui/widget/infomessage")
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
 local logger = require("logger")
+local time = require("ui/time")
 
 local DeviceManager = {
     devices_cache = {},
@@ -26,6 +28,7 @@ function DeviceManager:new()
     instance.devices_cache = {}
     instance.device_connect_callbacks = {}
     instance.device_disconnect_callbacks = {}
+    instance.connection_cooldowns = {}
 
     return instance
 end
@@ -81,35 +84,74 @@ function DeviceManager:scanForDevices(scan_duration, on_devices_found)
     end)
 end
 
+--- Minimum interval between automatic attempts to the same remote.
+DeviceManager.CONNECTION_COOLDOWN = 15
+
 ---
---- Connects to a Bluetooth device.
---- @param device table Device information table with path and name
---- @param on_success function Optional callback to execute on successful connection
---- @return boolean True if connection succeeded, false otherwise
-function DeviceManager:connectDevice(device, on_success)
-    logger.info("DeviceManager: Connecting to device:", device.name, "path:", device.path)
-
-    local local_on_success = function()
-        logger.dbg("DeviceManager: Updating device cache for", device.address, "to connected")
-
-        if self.devices_cache[device.address] then
-            self.devices_cache[device.address].connected = true
-        end
-
-        if on_success then
-            on_success(device)
-        end
+--- Starts one asynchronous, globally serialized connection attempt.
+--- @param device table Device information with address and path
+--- @param on_success function Optional callback after verified connection
+--- @param automatic boolean Apply the per-address retry cooldown (default: false)
+--- @return boolean True if the attempt was started
+function DeviceManager:connectDevice(device, on_success, automatic)
+    if not device or not device.address or not device.path then
+        return false
     end
 
-    if DbusAdapter.connectDevice(device.path) then
-        logger.info("DeviceManager: Successfully connected to", device.name)
+    if self.connection_attempt then
+        if not automatic then
+            UIManager:show(InfoMessage:new({
+                text = _("Bluetooth connection already in progress. Please try again shortly."),
+                timeout = 3,
+            }))
+        end
 
+        return false
+    end
+
+    local address = device.address
+    local now = time.now()
+
+    if automatic and now < (self.connection_cooldowns[address] or 0) then
+        return false
+    end
+
+    local token = {}
+    self.connection_token = token
+
+    local attempt = ConnectionAttempt.start(device, function(connected)
+        if self.connection_token ~= token then
+            return
+        end
+
+        self.connection_attempt = nil
+        self.connecting_address = nil
+        self.connection_token = nil
+        self.connection_cooldowns[address] = time.now() + time.s(DeviceManager.CONNECTION_COOLDOWN)
+
+        if not connected then
+            UIManager:show(InfoMessage:new({
+                text = _("Failed to connect to") .. " " .. (device.name or address),
+                timeout = 3,
+            }))
+
+            return
+        end
+
+        device.connected = true
+        self.devices_cache[address] = device
         UIManager:show(InfoMessage:new({
-            text = _("Connected to") .. " " .. device.name,
+            text = _("Connected to") .. " " .. (device.name or address),
             timeout = 2,
         }))
 
-        local_on_success()
+        if on_success then
+            local ok, err = pcall(on_success, device)
+
+            if not ok then
+                logger.warn("DeviceManager: Connection completion callback error:", err)
+            end
+        end
 
         for _, callback in ipairs(self.device_connect_callbacks) do
             local ok, err = pcall(callback, device)
@@ -118,38 +160,60 @@ function DeviceManager:connectDevice(device, on_success)
                 logger.warn("DeviceManager: Device connect callback error:", err)
             end
         end
+    end)
 
-        return true
+    if not attempt then
+        self.connection_token = nil
+
+        if not automatic then
+            UIManager:show(InfoMessage:new({
+                text = _("Could not start Bluetooth connection. Please try again shortly."),
+                timeout = 3,
+            }))
+        end
+
+        return false
     end
 
-    logger.warn("DeviceManager: Failed to connect to", device.name)
+    self.connection_cooldowns[address] = now + time.s(DeviceManager.CONNECTION_COOLDOWN)
+    self.connecting_address = address
+    self.connection_attempt = attempt
 
-    UIManager:show(InfoMessage:new({
-        text = _("Failed to connect to") .. " " .. device.name,
-        timeout = 3,
-    }))
-
-    return false
+    return true
 end
 
 ---
---- Connects to a Bluetooth device in the background (non-blocking).
---- Uses a subprocess to avoid freezing the UI during D-Bus connection.
---- Does not show notifications or invoke callbacks - use auto-detection polling
---- to detect when the connection succeeds and handle input device setup.
---- @param device table Device information table with path and name
---- @return boolean True if background connect was started, false otherwise
+--- Compatibility entry point; completion no longer depends on auto-detection.
+--- @param device table Device information
+--- @return boolean True if the attempt was started
 function DeviceManager:connectDeviceInBackground(device)
-    logger.info("DeviceManager: Starting background connect to:", device.name, "path:", device.path)
-
-    return DbusAdapter.connectDeviceInBackground(device.path)
+    return self:connectDevice(device)
 end
+
+---
+--- Invalidates pending completion callbacks during suspend or shutdown.
+function DeviceManager:cancelConnection(address)
+    if address and self.connecting_address ~= address then
+        return
+    end
+
+    self.connection_token = nil
+    self.connecting_address = nil
+
+    if self.connection_attempt then
+        self.connection_attempt:cancel()
+        self.connection_attempt = nil
+    end
+end
+
 ---
 --- Disconnects from a Bluetooth device.
 --- @param device table Device information table with path and name
 --- @param on_success function Optional callback to execute on successful disconnection
 --- @return boolean True if disconnection succeeded, false otherwise
 function DeviceManager:disconnectDevice(device, on_success)
+    -- Device1.Disconnect also cancels a pending Connect for this device.
+    self:cancelConnection(device.address)
     logger.info("DeviceManager: Disconnecting from device:", device.name, "path:", device.path)
 
     local local_on_success = function()
@@ -214,6 +278,7 @@ end
 --- @param on_success function Optional callback to execute on successful removal
 --- @return boolean True if removal succeeded, false otherwise
 function DeviceManager:removeDevice(device, on_success)
+    self:cancelConnection(device.address)
     logger.info("DeviceManager: Removing device:", device.name, "path:", device.path)
 
     if DbusAdapter.removeDevice(device.path) then

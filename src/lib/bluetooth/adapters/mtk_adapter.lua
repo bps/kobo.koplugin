@@ -52,23 +52,23 @@ MtkAdapter.COMMANDS_OFF = {
 ---
 --- Command to check Bluetooth power status.
 --- @field string D-Bus command to query Powered property.
-MtkAdapter.COMMAND_CHECK_STATUS = "dbus-send --system --print-reply --dest=com.kobo.mtk.bluedroid /org/bluez/hci0 "
+MtkAdapter.COMMAND_CHECK_STATUS = "dbus-send --system --print-reply --reply-timeout=1000 --dest=com.kobo.mtk.bluedroid /org/bluez/hci0 "
     .. "org.freedesktop.DBus.Properties.Get "
     .. "string:org.bluez.Adapter1 string:Powered 2>/dev/null"
 
 ---
 --- Command to start Bluetooth discovery.
-MtkAdapter.COMMAND_START_DISCOVERY = "dbus-send --system --print-reply --dest=com.kobo.mtk.bluedroid /org/bluez/hci0 "
+MtkAdapter.COMMAND_START_DISCOVERY = "dbus-send --system --print-reply --reply-timeout=1000 --dest=com.kobo.mtk.bluedroid /org/bluez/hci0 "
     .. "org.bluez.Adapter1.StartDiscovery"
 
 ---
 --- Command to stop Bluetooth discovery.
-MtkAdapter.COMMAND_STOP_DISCOVERY = "dbus-send --system --print-reply --dest=com.kobo.mtk.bluedroid /org/bluez/hci0 "
+MtkAdapter.COMMAND_STOP_DISCOVERY = "dbus-send --system --print-reply --reply-timeout=1000 --dest=com.kobo.mtk.bluedroid /org/bluez/hci0 "
     .. "org.bluez.Adapter1.StopDiscovery"
 
 ---
 --- Command to get all managed Bluetooth objects (devices).
-MtkAdapter.COMMAND_GET_MANAGED_OBJECTS = "dbus-send --system --print-reply --dest=com.kobo.mtk.bluedroid / "
+MtkAdapter.COMMAND_GET_MANAGED_OBJECTS = "dbus-send --system --print-reply --reply-timeout=1000 --dest=com.kobo.mtk.bluedroid / "
     .. "org.freedesktop.DBus.ObjectManager.GetManagedObjects"
 
 ---
@@ -204,7 +204,7 @@ function MtkAdapter.connectDevice(device_path)
     logger.info("MtkAdapter: Connecting to device:", device_path)
 
     local cmd = string.format(
-        "dbus-send --system --print-reply --dest=com.kobo.mtk.bluedroid %s org.bluez.Device1.Connect",
+        "dbus-send --system --print-reply --reply-timeout=10000 --dest=com.kobo.mtk.bluedroid %s org.bluez.Device1.Connect",
         device_path
     )
 
@@ -225,7 +225,7 @@ function MtkAdapter.disconnectDevice(device_path)
     logger.info("MtkAdapter: Disconnecting from device:", device_path)
 
     local cmd = string.format(
-        "dbus-send --system --print-reply --dest=com.kobo.mtk.bluedroid %s org.bluez.Device1.Disconnect",
+        "dbus-send --system --print-reply --reply-timeout=1000 --dest=com.kobo.mtk.bluedroid %s org.bluez.Device1.Disconnect",
         device_path
     )
 
@@ -251,7 +251,7 @@ function MtkAdapter.removeDevice(device_path)
     end
 
     local cmd = string.format(
-        "dbus-send --system --print-reply --dest=com.kobo.mtk.bluedroid /org/bluez/hci0 org.bluez.Adapter1.RemoveDevice objpath:%s",
+        "dbus-send --system --print-reply --reply-timeout=1000 --dest=com.kobo.mtk.bluedroid /org/bluez/hci0 org.bluez.Adapter1.RemoveDevice objpath:%s",
         device_path
     )
 
@@ -274,7 +274,7 @@ function MtkAdapter.setDeviceTrusted(device_path, trusted)
     logger.info("MtkAdapter: Setting device trusted:", device_path, "to", trust_str)
 
     local cmd = string.format(
-        "dbus-send --system --print-reply --dest=com.kobo.mtk.bluedroid %s "
+        "dbus-send --system --print-reply --reply-timeout=1000 --dest=com.kobo.mtk.bluedroid %s "
             .. "org.freedesktop.DBus.Properties.Set "
             .. "string:org.bluez.Device1 string:Trusted variant:boolean:%s",
         device_path,

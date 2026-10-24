@@ -26,6 +26,7 @@ local logger = require("logger")
 --- These priorities control the execution order of D-Bus event handlers.
 local PRIORITY_CACHE_SYNC = 10
 local PRIORITY_USER_ACTIONS = 50
+local AUTO_CONNECT_SCAN_SECONDS = 60
 
 local KoboBluetooth = InputContainer:extend({
     name = "kobo_bluetooth",
@@ -102,6 +103,16 @@ function KoboBluetooth:init() end
 --- @param broadcast_refresh boolean Whether to broadcast a UI refresh event (default: true)
 function KoboBluetooth:_cleanup(broadcast_refresh)
     logger.dbg("KoboBluetooth: _cleanup")
+    self.cleaning_up = true
+
+    if self.deferred_connect_task then
+        UIManager:unschedule(self.deferred_connect_task)
+        self.deferred_connect_task = nil
+    end
+
+    if self.device_manager then
+        self.device_manager:cancelConnection()
+    end
 
     -- Stop key bindings polling
     if self.key_bindings then
@@ -123,6 +134,7 @@ function KoboBluetooth:_cleanup(broadcast_refresh)
         self.input_handler:closeAllIsolatedInputDevices()
     end
 
+    self.cleaning_up = false
     logger.dbg("KoboBluetooth: _cleanup completed")
 end
 
@@ -163,6 +175,17 @@ function KoboBluetooth:initWithPlugin(plugin)
 
     self.input_handler:registerDeviceCloseCallback(function(device_address, device_path)
         self:onInputDeviceClosed(device_address, device_path)
+    end)
+    self.input_handler:registerDeviceOpenCallback(function(device_address)
+        local device = self.device_manager:getDeviceByAddress(device_address)
+
+        if device then
+            self:onDeviceConnected(device)
+        end
+
+        if self.key_bindings then
+            self.key_bindings:startPolling()
+        end
     end)
 
     self.input_handler:registerDeviceOpenCallback(function(device_address)
@@ -803,6 +826,7 @@ function KoboBluetooth:_handleDisconnection(device_address)
         self.last_seen_rssi[device_address] = device.rssi
     end
 
+    self.input_handler:closeIsolatedInputDevice(device)
     logger.dbg("KoboBluetooth: restarting auto-connect and auto-detect polling after disconnect")
 
     self:startAutoConnectPolling()
@@ -937,7 +961,7 @@ function KoboBluetooth:onRssiPropertyChanged(device_address, properties)
 
     self.is_startup_auto_connect = false
 
-    self:connectToDevice(device.address, true)
+    self:connectToDevice(device.address, true, true)
 end
 
 ---
@@ -980,6 +1004,11 @@ function KoboBluetooth:stopAutoConnectPolling(broadcast_refresh)
 
     self:_stopDirectConnect()
 
+    if self.auto_connect_timeout_task then
+        UIManager:unschedule(self.auto_connect_timeout_task)
+        self.auto_connect_timeout_task = nil
+    end
+
     if self.is_auto_connect_active then
         self.dbus_monitor:unregisterCallback("kobobluetooth:auto_connect")
         self.is_auto_connect_active = false
@@ -1007,6 +1036,10 @@ end
 ---   and discovery starts a few seconds later so it does not compete with those attempts.
 function KoboBluetooth:startAutoConnectPolling(after_bluetooth_enabled)
     logger.dbg("KoboBluetooth: startAutoConnectPolling")
+
+    if self.is_auto_connect_active then
+        return
+    end
 
     if not self.plugin or not self.plugin.settings.enable_auto_connect_polling then
         logger.dbg("KoboBluetooth: Auto-connect not enabled in settings")
@@ -1054,6 +1087,19 @@ function KoboBluetooth:startAutoConnectPolling(after_bluetooth_enabled)
     end
 
     self.is_auto_connect_active = true
+
+    local timeout_task
+
+    timeout_task = function()
+        if self.auto_connect_timeout_task ~= timeout_task then
+            return
+        end
+
+        self:stopAutoConnectPolling(true)
+    end
+
+    self.auto_connect_timeout_task = timeout_task
+    UIManager:scheduleIn(AUTO_CONNECT_SCAN_SECONDS, timeout_task)
 
     self:_startDirectConnect(after_bluetooth_enabled)
 end
@@ -1287,7 +1333,7 @@ function KoboBluetooth:_onInputNodeDetected(device)
 
     local show_notifications = self.plugin.settings.show_device_ready_notifications ~= false
 
-    if not self.input_handler:openIsolatedInputDevice(device, show_notifications, false) then
+    if not self.input_handler:openIsolatedInputDevice(device, show_notifications, true) then
         return
     end
 
@@ -1478,7 +1524,7 @@ end
 --- Stops auto-connect polling if disable_auto_connect_after_connect is enabled.
 --- @param device table Device information
 function KoboBluetooth:onDeviceConnected(device)
-    if not self.plugin then
+    if not self.plugin or not self.input_handler:getIsolatedReader(device.address) then
         return
     end
 
@@ -1501,7 +1547,7 @@ end
 --- @param device_address string The Bluetooth address of the disconnected device
 --- @param device_path string The input device path that was closed
 function KoboBluetooth:onInputDeviceClosed(device_address, device_path)
-    if not self.plugin then
+    if not self.plugin or self.cleaning_up then
         return
     end
 
@@ -1619,8 +1665,9 @@ end
 --- of them is still pending, the request waits for it (_connectAfterPendingAttempt).
 --- @param address string The Bluetooth address of the device to connect to
 --- @param show_notification boolean Optional. Whether to show connection notifications. Defaults to true.
+--- @param automatic boolean Whether to apply the automatic retry cooldown
 --- @return boolean True if connection was initiated, false otherwise
-function KoboBluetooth:connectToDevice(address, show_notification)
+function KoboBluetooth:connectToDevice(address, show_notification, automatic)
     if show_notification == nil then
         show_notification = true
     end
@@ -1677,7 +1724,7 @@ function KoboBluetooth:connectToDevice(address, show_notification)
 
         local connection_callback = function()
             logger.info("KoboBluetooth: Bluetooth enabled, attempting connection to:", address)
-            self:connectToDevice(address, show_notification)
+            self:connectToDevice(address, show_notification, automatic)
         end
 
         self:turnBluetoothOn(false, connection_callback)
@@ -1744,7 +1791,7 @@ function KoboBluetooth:connectToDevice(address, show_notification)
             UIManager:close(message)
         end
 
-        self:_connectAfterPendingAttempt(address, show_notification, pending)
+        self:_connectAfterPendingAttempt(address, show_notification, pending, automatic)
 
         return true
     end
@@ -1756,7 +1803,7 @@ function KoboBluetooth:connectToDevice(address, show_notification)
         if self.key_bindings then
             self.key_bindings:startPolling()
         end
-    end)
+    end, automatic)
 
     if message then
         UIManager:close(message)
@@ -1774,10 +1821,22 @@ end
 --- @param address string The Bluetooth address of the device to connect to
 --- @param show_notification boolean Whether to tell the user about the wait
 --- @param wait_seconds number Seconds until the pending attempt has had its time
-function KoboBluetooth:_connectAfterPendingAttempt(address, show_notification, wait_seconds)
+--- @param automatic boolean Whether to apply the automatic retry cooldown
+function KoboBluetooth:_connectAfterPendingAttempt(address, show_notification, wait_seconds, automatic)
     logger.info("KoboBluetooth: Waiting", wait_seconds, "s for a pending background connect before connecting")
 
-    UIManager:scheduleIn(wait_seconds, function()
+    if self.deferred_connect_task then
+        UIManager:unschedule(self.deferred_connect_task)
+    end
+
+    local task
+    task = function()
+        if self.deferred_connect_task ~= task then
+            return
+        end
+
+        self.deferred_connect_task = nil
+
         if self:_hasOpenInputReader(address) then
             logger.info("KoboBluetooth: Device connected while waiting, nothing more to do:", address)
 
@@ -1785,9 +1844,12 @@ function KoboBluetooth:_connectAfterPendingAttempt(address, show_notification, w
         end
 
         self.direct_connect_wait_over = true
-        self:connectToDevice(address, show_notification)
+        self:connectToDevice(address, show_notification, automatic)
         self.direct_connect_wait_over = false
-    end)
+    end
+
+    self.deferred_connect_task = task
+    UIManager:scheduleIn(wait_seconds, task)
 
     if show_notification then
         UIManager:show(InfoMessage:new({

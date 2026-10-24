@@ -124,11 +124,20 @@ object path "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"
                 connected = false,
             }
 
+            setMockPopenOutput([[
+object path "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"
+  string "Address"
+    variant string "AA:BB:CC:DD:EE:FF"
+  string "Connected"
+    variant boolean true
+]])
             local on_connect_called = false
             instance.device_manager:connectDevice(device, function()
                 on_connect_called = true
             end)
 
+            assert.is_false(on_connect_called)
+            UIManager:executeScheduledTasks(1)
             assert.is_true(on_connect_called)
         end)
     end)
