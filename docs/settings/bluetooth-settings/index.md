@@ -19,3 +19,14 @@ for Bluetooth remotes and keyboards.
 - **[Swap Page-Turn Buttons When Inverted](./swap-page-turn-when-inverted.md)**: Reverse the
   page-turn buttons of a remote while the screen is rotated 180°
 - **[Menu Navigation](./menu.md)**: How to access Bluetooth settings and menu hierarchy reference
+
+## Prevent exiting while Bluetooth is on
+
+Enabled by default under Settings → Network → Bluetooth → Settings. While Bluetooth is powered
+on, the plugin disables the Exit menu item and blocks Exit commands from gestures and keyboard
+bindings. Turn Bluetooth off to exit normally, or disable this setting to allow Exit at any time.
+
+Restart, sleep, reboot, power-off and direct calls to KOReader's quit function are unchanged.
+This feature is part of the plugin; no separate user patch is required. Remove
+`2-disable-exit-while-bluetooth-on.lua` from KOReader's patches directory if you previously
+installed the standalone version, then restart KOReader.

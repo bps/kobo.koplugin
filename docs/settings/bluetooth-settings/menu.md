@@ -33,7 +33,8 @@ Settings → Network → Bluetooth
     │   └── Stop auto-connect after connection [Toggle]
     ├── Dismiss pop-ups with button press [Toggle]
     ├── Swap page-turn buttons when screen is inverted [Toggle]
-    └── Show device ready notifications [Toggle]
+    ├── Show device ready notifications [Toggle]
+    └── Prevent exiting while Bluetooth is on [Toggle]
 ```
 
 ## Menu Item Reference
@@ -53,6 +54,7 @@ Settings → Network → Bluetooth
 | Dismiss pop-ups with button press              | Toggle  | Allow Bluetooth buttons to close dismissable dialogs    |
 | Swap page-turn buttons when screen is inverted | Toggle  | Reverse next/previous page while the screen is inverted |
 | Show device ready notifications                | Toggle  | Show notification when input device connects and ready  |
+| Prevent exiting while Bluetooth is on          | Toggle  | Block Exit while Bluetooth is powered on (default: on)  |
 | Auto-detection                                 | Submenu | Auto-detection settings submenu                         |
 | Auto-detect connecting devices                 | Toggle  | Enable/disable polling for auto-connected devices       |
 | Stop detection after connection                | Toggle  | Stop polling once a device successfully connects        |

@@ -1999,11 +1999,15 @@ function KoboBluetooth:addToMainMenu(menu_items)
                 checked_func = function()
                     return self:isBluetoothEnabled()
                 end,
-                callback = function()
+                callback = function(touchmenu_instance)
                     if self:isBluetoothEnabled() then
                         self:turnBluetoothOff()
                     else
-                        self:turnBluetoothOn()
+                        self:turnBluetoothOn(false, function()
+                            if touchmenu_instance and UIManager:isWidgetShown(touchmenu_instance.show_parent) then
+                                touchmenu_instance:updateItems()
+                            end
+                        end)
                     end
                 end,
             },
@@ -2213,6 +2217,22 @@ function KoboBluetooth:addToMainMenu(menu_items)
                             if self.plugin then
                                 local current_enabled = self.plugin.settings.show_device_ready_notifications ~= false
                                 self.plugin.settings.show_device_ready_notifications = not current_enabled
+                                self.plugin:saveSettings()
+                            end
+                        end,
+                    },
+                    {
+                        text = _("Prevent exiting while Bluetooth is on"),
+                        help_text = _(
+                            "Disable the Exit command while Bluetooth is powered on. Turn Bluetooth off before exiting. Restart, sleep, reboot and power-off are unchanged."
+                        ),
+                        checked_func = function()
+                            return self.plugin and self.plugin.settings.prevent_exit_while_bluetooth_on ~= false
+                        end,
+                        callback = function()
+                            if self.plugin then
+                                self.plugin.settings.prevent_exit_while_bluetooth_on =
+                                    self.plugin.settings.prevent_exit_while_bluetooth_on == false
                                 self.plugin:saveSettings()
                             end
                         end,

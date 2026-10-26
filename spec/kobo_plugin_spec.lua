@@ -49,6 +49,24 @@ describe("KoboPlugin", function()
             assert.is_not_nil(instance.reading_state_sync)
             assert.is_not_nil(instance.kobo_bluetooth)
             assert.is_not_nil(instance.settings)
+            assert.is_true(instance.settings.prevent_exit_while_bluetooth_on)
+        end)
+
+        it("should install the Exit guard and honor its setting", function()
+            local instance = KoboPlugin:new()
+            instance.ui = { menu = { registerToMainMenu = function() end } }
+            instance:init()
+            local is_enabled = stub(instance.kobo_bluetooth, "isBluetoothEnabled", function()
+                return true
+            end)
+            finally(function()
+                is_enabled:revert()
+            end)
+            local exit_item = require("ui/elements/common_exit_menu_table").exit
+
+            assert.is_false(exit_item.enabled_func())
+            instance.settings.prevent_exit_while_bluetooth_on = false
+            assert.is_true(exit_item.enabled_func())
         end)
 
         it("should initialize paired_devices setting to empty table", function()

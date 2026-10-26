@@ -1511,6 +1511,19 @@ if not package.preload["readhistory"] then
     end
 end
 
+-- Exit command hooks used by the Bluetooth exit guard.
+if not package.preload["device/devicelistener"] then
+    package.preload["device/devicelistener"] = function()
+        return { onExit = function() end }
+    end
+end
+
+if not package.preload["ui/elements/common_exit_menu_table"] then
+    package.preload["ui/elements/common_exit_menu_table"] = function()
+        return { exit = {}, exit_menu = {}, restart_koreader = {} }
+    end
+end
+
 -- Mock ui/uimanager module with call tracking
 if not package.preload["ui/uimanager"] then
     package.preload["ui/uimanager"] = function()

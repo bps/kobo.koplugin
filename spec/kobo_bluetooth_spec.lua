@@ -159,6 +159,85 @@ describe("KoboBluetooth", function()
                 assert.are.equal("network", menu_items.bluetooth.sorting_hint)
             end)
 
+            it("should refresh the open menu after Bluetooth finishes enabling", function()
+                local instance = KoboBluetooth.create()
+                local menu_items = {}
+                local enabled = false
+                local on_complete
+                local parent = {}
+                local visible = parent
+                local refreshes = 0
+                local touchmenu = {
+                    show_parent = parent,
+                    updateItems = function()
+                        refreshes = refreshes + 1
+                    end,
+                }
+                instance.isBluetoothEnabled = function()
+                    return enabled
+                end
+                instance.turnBluetoothOn = function(_, is_resume, callback)
+                    assert.is_false(is_resume)
+                    on_complete = callback
+                end
+                instance:addToMainMenu(menu_items)
+                local toggle = menu_items.bluetooth.sub_item_table[1]
+                local original_isWidgetShown = UIManager.isWidgetShown
+                UIManager.isWidgetShown = function(_, widget)
+                    return widget == visible
+                end
+
+                finally(function()
+                    UIManager.isWidgetShown = original_isWidgetShown
+                end)
+
+                toggle.callback(touchmenu)
+                assert.are.equal(0, refreshes)
+                assert.is_false(toggle.checked_func())
+                enabled = true
+                on_complete()
+                assert.are.equal(1, refreshes)
+                assert.is_true(toggle.checked_func())
+                assert.is_true(menu_items.bluetooth.sub_item_table[2].enabled_func())
+                assert.is_true(menu_items.bluetooth.sub_item_table[3].enabled_func())
+
+                visible = nil
+                on_complete()
+                assert.are.equal(1, refreshes)
+            end)
+
+            it("should allow enabling without a menu instance", function()
+                local instance = KoboBluetooth.create()
+                local menu_items = {}
+                instance.isBluetoothEnabled = function()
+                    return false
+                end
+                instance.turnBluetoothOn = function(_, _, callback)
+                    callback()
+                end
+                instance:addToMainMenu(menu_items)
+
+                assert.has_no.errors(function()
+                    menu_items.bluetooth.sub_item_table[1].callback()
+                end)
+            end)
+
+            it("should still turn Bluetooth off from the menu", function()
+                local instance = KoboBluetooth.create()
+                local menu_items = {}
+                local turned_off = false
+                instance.isBluetoothEnabled = function()
+                    return true
+                end
+                instance.turnBluetoothOff = function()
+                    turned_off = true
+                end
+                instance:addToMainMenu(menu_items)
+                menu_items.bluetooth.sub_item_table[1].callback()
+
+                assert.is_true(turned_off)
+            end)
+
             it("should have submenu structure", function()
                 Device._isMTK = true
                 local instance = KoboBluetooth.create()
@@ -181,7 +260,7 @@ describe("KoboBluetooth", function()
                 local settings_item = menu_items.bluetooth.sub_item_table[4]
                 assert.are.equal("Settings", settings_item.text)
                 assert.is_not_nil(settings_item.sub_item_table)
-                assert.are.equal(8, #settings_item.sub_item_table)
+                assert.are.equal(9, #settings_item.sub_item_table)
 
                 local enable_on_startup = settings_item.sub_item_table[2]
                 assert.are.equal("Enable on startup", enable_on_startup.text)
@@ -206,6 +285,16 @@ describe("KoboBluetooth", function()
                 swap_when_inverted.callback()
                 assert.is_true(swap_when_inverted.checked_func())
                 assert.is_true(mock_plugin.settings.swap_page_turn_when_inverted)
+
+                local prevent_exit = settings_item.sub_item_table[9]
+                assert.are.equal("Prevent exiting while Bluetooth is on", prevent_exit.text)
+                assert.is_true(prevent_exit.checked_func())
+                prevent_exit.callback()
+                assert.is_false(prevent_exit.checked_func())
+                assert.is_false(mock_plugin.settings.prevent_exit_while_bluetooth_on)
+                prevent_exit.callback()
+                assert.is_true(prevent_exit.checked_func())
+                assert.is_true(mock_plugin.settings.prevent_exit_while_bluetooth_on)
             end)
         end)
 

@@ -152,6 +152,7 @@ local default_settings = {
     paired_devices = {},
     enable_bluetooth_auto_resume = false,
     enable_bluetooth_on_startup = false,
+    prevent_exit_while_bluetooth_on = true,
     enable_auto_detection_polling = false,
     disable_auto_detection_after_connect = true,
     enable_auto_connect_polling = false,
@@ -217,6 +218,10 @@ function KoboPlugin:init()
     table.insert(self, self.kobo_bluetooth)
 
     self.kobo_bluetooth:initWithPlugin(self)
+
+    if self.kobo_bluetooth:isDeviceSupported() then
+        require("src/lib/bluetooth/exit_guard").install(self)
+    end
 
     self.reading_state_sync:setPlugin(self, SYNC_DIRECTION)
     self:addMenuItems()
