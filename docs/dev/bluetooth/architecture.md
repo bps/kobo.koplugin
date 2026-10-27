@@ -38,9 +38,9 @@ implementation where device-specific subclasses override only critical methods.
 ### Direct-connect policy
 
 `src/lib/bluetooth/direct_connect.lua` contains direct-attempt scheduling, last-used-device
-ordering, discovery handover and deferred requests. The controller exposes these methods under
-their existing names through explicit aliases. They operate on controller state rather than
-creating a second stateful instance, preserving callback identity and device-instance handover.
+ordering, discovery handover and deferred requests. The controller exposes these methods under their
+existing names through explicit aliases. They operate on controller state rather than creating a
+second stateful instance, preserving callback identity and device-instance handover.
 
 Device power management, input-ready handling and UI menus remain in the controller. Policy
 characterization tests cover task reuse, attempt selection, stopping and already-present input

@@ -7,8 +7,8 @@
 --- 3. Decrypting content keys and files
 --- 4. Creating decrypted EPUB/KEPUB files
 
-local Archiver = require("ffi/archiver")
 local ArchiveWriter = require("src/lib/drm/archive_writer")
+local Archiver = require("ffi/archiver")
 local FileDecryptor = require("src/lib/drm/file_decryptor")
 local KeyDerivation = require("src/lib/drm/key_derivation")
 local SQ3 = require("lua-ljsqlite3/init")
@@ -354,7 +354,8 @@ function KoboKDRM:decryptBook(book_id, input_path, output_path, kobo_dir, db_pat
                 local content = assert(input_arc:extractToMemory(entry.index), "Could not read: " .. entry.path)
                 if content_keys_map[entry.path] then
                     local key = assert(decrypted_keys[entry.path], "Could not decrypt key: " .. entry.path)
-                    content = assert(FileDecryptor:decryptFileContent(content, key), "Could not decrypt: " .. entry.path)
+                    content =
+                        assert(FileDecryptor:decryptFileContent(content, key), "Could not decrypt: " .. entry.path)
                 end
                 -- EPUB's mimetype entry must not be compressed.
                 assert(output_arc:setZipCompression(entry.path == "mimetype" and "store" or "deflate"))

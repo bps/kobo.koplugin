@@ -180,7 +180,11 @@ describe("Bluetooth exit guard", function()
         bluetooth_on = true
         local replacement = {
             settings = { prevent_exit_while_bluetooth_on = false },
-            kobo_bluetooth = { isBluetoothEnabled = function() return true end },
+            kobo_bluetooth = {
+                isBluetoothEnabled = function()
+                    return true
+                end,
+            },
         }
         guard.install(replacement)
         assert.are.equal(send, UIManager.sendEvent)

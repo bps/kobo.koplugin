@@ -1,19 +1,33 @@
 local runtime = dofile("test/integration/runtime.lua")
+local archiver = require("ffi/archiver")
+local cache = require("src/lib/drm/cache_manager")
+local checked = require("src/lib/drm/archive_writer")
 local ffi = require("ffi")
 local lfs = require("lfs")
-local archiver = require("ffi/archiver")
-local checked = require("src/lib/drm/archive_writer")
-local cache = require("src/lib/drm/cache_manager")
 -- Cryptography is outside this suite; archive, filesystem and rename operations are real.
 package.loaded["src/lib/drm/file_decryptor"] = {
-    decryptContentKey = function() return "key" end,
-    decryptFileContent = function(_, content) return "decrypted:" .. content end,
+    decryptContentKey = function()
+        return "key"
+    end,
+    decryptFileContent = function(_, content)
+        return "decrypted:" .. content
+    end,
 }
-package.loaded["src/lib/drm/key_derivation"] = { findWorkingKey = function() return "key" end }
+package.loaded["src/lib/drm/key_derivation"] = {
+    findWorkingKey = function()
+        return "key"
+    end,
+}
 local kdrm = require("src/lib/drm/kobo_kdrm")
-kdrm.getDeviceSerial = function() return "serial" end
-kdrm.getUserId = function() return "user" end
-kdrm.getContentKeys = function() return { chapter = "key" } end
+kdrm.getDeviceSerial = function()
+    return "serial"
+end
+kdrm.getUserId = function()
+    return "user"
+end
+kdrm.getContentKeys = function()
+    return { chapter = "key" }
+end
 
 local function contents(path)
     local file = assert(io.open(path, "rb"))
@@ -63,8 +77,12 @@ runtime.test("failed decryption leaves the previous complete archive byte-for-by
     local before = contents(output)
     local decryptor = package.loaded["src/lib/drm/file_decryptor"]
     local original = decryptor.decryptFileContent
-    runtime.cleanup(function() decryptor.decryptFileContent = original end)
-    decryptor.decryptFileContent = function() return nil end
+    runtime.cleanup(function()
+        decryptor.decryptFileContent = original
+    end)
+    decryptor.decryptFileContent = function()
+        return nil
+    end
     assert(kdrm:decryptBook("book", input, output, "kobo", "db") == false)
     assert(contents(output) == before)
 end)
@@ -88,7 +106,9 @@ runtime.test("failed rename does not remove a destination directory", function()
     local destination = runtime.temporaryFile()
     os.remove(destination)
     assert(lfs.mkdir(destination))
-    runtime.cleanup(function() lfs.rmdir(destination) end)
+    runtime.cleanup(function()
+        lfs.rmdir(destination)
+    end)
     assert(kdrm:decryptBook("book", inputArchive(), destination, "kobo", "db") == false)
     assert(lfs.attributes(destination, "mode") == "directory")
 end)

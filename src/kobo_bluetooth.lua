@@ -11,6 +11,7 @@ local DbusAdapter = require("src/lib/bluetooth/dbus_adapter")
 local DbusMonitor = require("src/lib/bluetooth/dbus_monitor")
 local Device = require("device")
 local DeviceManager = require("src/lib/bluetooth/device_manager")
+local DirectConnect = require("src/lib/bluetooth/direct_connect")
 local Event = require("ui/event")
 local InfoMessage = require("ui/widget/infomessage")
 local InputContainer = require("ui/widget/container/inputcontainer")
@@ -19,7 +20,6 @@ local UIManager = require("ui/uimanager")
 local UiMenus = require("src/lib/bluetooth/ui_menus")
 local _ = require("gettext")
 local logger = require("logger")
-local DirectConnect = require("src/lib/bluetooth/direct_connect")
 
 ---
 --- D-Bus callback priority constants.
@@ -1933,8 +1933,8 @@ function KoboBluetooth:addToMainMenu(menu_items)
                         end,
                         callback = function()
                             if self.plugin then
-                                self.plugin.settings.prevent_exit_while_bluetooth_on =
-                                    self.plugin.settings.prevent_exit_while_bluetooth_on == false
+                                self.plugin.settings.prevent_exit_while_bluetooth_on = self.plugin.settings.prevent_exit_while_bluetooth_on
+                                    == false
                                 self.plugin:saveSettings()
                             end
                         end,

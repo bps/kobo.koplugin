@@ -10,7 +10,8 @@ system operations. Passing these tests does not establish filesystem, process or
 
 The separate suite runs in fresh LuaJIT processes without `spec/helper.lua`. It uses real files,
 libarchive, SQLite databases, child processes, pipes and process cleanup. Cryptographic operations
-in the archive tests are deterministic stand-ins; this is not a cryptography or device-firmware test.
+in the archive tests are deterministic stand-ins; this is not a cryptography or device-firmware
+test.
 
 Required dependencies:
 
@@ -27,8 +28,8 @@ git -C .native-runtime/koreader-base checkout cd173c179a56b42ddbf06b6ac3eafec099
 KOREADER_BASE="$PWD/.native-runtime/koreader-base" bash test/run-integration.bash
 ```
 
-Every suite has a 20-second deadline. Missing dependencies are errors, not skipped tests.
-The private `dbus-monitor` fixture is placed first on PATH only for this runner. The tests do not
+Every suite has a 20-second deadline. Missing dependencies are errors, not skipped tests. The
+private `dbus-monitor` fixture is placed first on PATH only for this runner. The tests do not
 connect to the host system bus or terminate unrelated monitors.
 
 The SQLite tests use temporary databases and injected database triggers. They check successful

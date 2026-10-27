@@ -16,18 +16,28 @@ describe("Direct-connect policy characterization", function()
         instance = Bluetooth:new()
         instance.plugin = { settings = { bluetooth_last_connected = "BB" } }
         instance.device_manager = {
-            getDevices = function() return devices end,
-            connectDeviceInBackground = function(_, device) attempts[#attempts + 1] = device.address end,
+            getDevices = function()
+                return devices
+            end,
+            connectDeviceInBackground = function(_, device)
+                attempts[#attempts + 1] = device.address
+            end,
         }
         instance.input_handler = {
-            getIsolatedReader = function() return nil end,
-            findInputNodeForDevice = function() return nil end,
+            getIsolatedReader = function()
+                return nil
+            end,
+            findInputNodeForDevice = function()
+                return nil
+            end,
         }
         instance.is_auto_connect_active = true
         instance.direct_connect_last_attempt_time = 0
     end)
 
-    after_each(function() instance:_stopDirectConnect() end)
+    after_each(function()
+        instance:_stopDirectConnect()
+    end)
 
     it("keeps the existing scheduled task while renewing its attempt budget", function()
         instance:_startDirectConnect(false)
@@ -63,9 +73,13 @@ describe("Direct-connect policy characterization", function()
     it("opens present input nodes instead of contacting their device", function()
         local opened = {}
         instance.input_handler.findInputNodeForDevice = function(_, device)
-            if device.address == "AA" then return "/dev/input/event5" end
+            if device.address == "AA" then
+                return "/dev/input/event5"
+            end
         end
-        instance._onInputNodeDetected = function(_, device) opened[#opened + 1] = device.address end
+        instance._onInputNodeDetected = function(_, device)
+            opened[#opened + 1] = device.address
+        end
         local candidates = instance:_openPresentInputNodes()
         assert.are.same({ "AA" }, opened)
         assert.are.same({ devices[2] }, candidates)

@@ -11,7 +11,8 @@ describe("D-Bus monitor stream safety", function()
         end)
     end)
 
-    local signal = [[signal time=1.0 sender=:1.42 path=/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF; interface=org.freedesktop.DBus.Properties; member=PropertiesChanged
+    local signal =
+        [[signal time=1.0 sender=:1.42 path=/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF; interface=org.freedesktop.DBus.Properties; member=PropertiesChanged
    string "org.bluez.Device1"
    array [
       dict entry(
@@ -64,7 +65,11 @@ describe("D-Bus monitor stream safety", function()
 
     it("closes only its owned transport and never invokes pkill", function()
         local closed = 0
-        monitor.process = { close = function() closed = closed + 1 end }
+        monitor.process = {
+            close = function()
+                closed = closed + 1
+            end,
+        }
         monitor.is_active = true
         clearExecutedCommands()
         monitor:stopMonitoring()

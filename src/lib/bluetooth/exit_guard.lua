@@ -5,8 +5,8 @@
 local DeviceListener = require("device/devicelistener")
 local InfoMessage = require("ui/widget/infomessage")
 local UIManager = require("ui/uimanager")
-local exit_settings = require("ui/elements/common_exit_menu_table")
 local _ = require("gettext")
+local exit_settings = require("ui/elements/common_exit_menu_table")
 
 local ExitGuard = {}
 local current_plugin

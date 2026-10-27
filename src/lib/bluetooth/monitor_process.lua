@@ -1,9 +1,9 @@
 --- An owned dbus-monitor child with an unbuffered, non-blocking result pipe.
-local ffi = require("ffi")
-local ffiutil = require("ffi/util")
 local Subprocess = require("src/lib/bluetooth/subprocess")
 local UIManager = require("ui/uimanager")
 local bit = require("bit")
+local ffi = require("ffi")
+local ffiutil = require("ffi/util")
 require("ffi/posix_h")
 
 local C = ffi.C
@@ -12,21 +12,32 @@ local MonitorProcess = {}
 function MonitorProcess.start()
     local pid, fd = ffiutil.runInSubProcess(function(_, write_fd)
         Subprocess.detachFromStorage(write_fd)
-        if C.dup2(write_fd, 1) < 0 then C._exit(127) end
-        if write_fd ~= 1 then C.close(write_fd) end
+        if C.dup2(write_fd, 1) < 0 then
+            C._exit(127)
+        end
+        if write_fd ~= 1 then
+            C.close(write_fd)
+        end
         local command = "dbus-monitor"
         local filter = "type='signal',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'"
         local argv = ffi.new("char *[4]", {
-            ffi.cast("char *", command), ffi.cast("char *", "--system"), ffi.cast("char *", filter), nil,
+            ffi.cast("char *", command),
+            ffi.cast("char *", "--system"),
+            ffi.cast("char *", filter),
+            nil,
         })
         C.execvp(command, argv)
         C._exit(127)
     end, true, false)
-    if not pid then return nil end
+    if not pid then
+        return nil
+    end
 
     local process = { pid = pid, fd = fd }
     function process:close()
-        if not self.pid then return end
+        if not self.pid then
+            return
+        end
         local child = self.pid
         self.pid = nil
         C.close(self.fd)
@@ -49,8 +60,12 @@ function MonitorProcess.start()
     function process:read()
         local buffer = ffi.new("char[4096]")
         local count = tonumber(C.read(self.fd, buffer, 4096))
-        if count > 0 then return ffi.string(buffer, count) end
-        if count < 0 and (ffi.errno() == C.EAGAIN or ffi.errno() == C.EINTR) then return nil end
+        if count > 0 then
+            return ffi.string(buffer, count)
+        end
+        if count < 0 and (ffi.errno() == C.EAGAIN or ffi.errno() == C.EINTR) then
+            return nil
+        end
         return false -- EOF or fatal read error.
     end
     return process

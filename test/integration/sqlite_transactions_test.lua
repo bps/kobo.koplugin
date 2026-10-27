@@ -5,7 +5,9 @@ local writer = require("src/lib/kobo_state_writer")
 local function database()
     local path = runtime.temporaryFile()
     local db = sqlite.open(path)
-    runtime.cleanup(function() db:close() end)
+    runtime.cleanup(function()
+        db:close()
+    end)
     db:exec([[
         CREATE TABLE content (
             ContentID TEXT PRIMARY KEY, ContentType INTEGER, ___PercentRead REAL,
@@ -32,8 +34,11 @@ end)
 for _, content_type in ipairs({ 9, 6 }) do
     runtime.test("rolls back when ContentType " .. content_type .. " update fails", function()
         local path, db = database()
-        local trigger = db:prepare("CREATE TRIGGER reject_update BEFORE UPDATE ON content WHEN NEW.ContentType = "
-            .. content_type .. " BEGIN SELECT RAISE(FAIL, 'injected update failure'); END")
+        local trigger = db:prepare(
+            "CREATE TRIGGER reject_update BEFORE UPDATE ON content WHEN NEW.ContentType = "
+                .. content_type
+                .. " BEGIN SELECT RAISE(FAIL, 'injected update failure'); END"
+        )
         trigger:step()
         trigger:close()
         assert(writer.write(path, "BOOK", 50, 1, "reading") == false, "failed update reported success")

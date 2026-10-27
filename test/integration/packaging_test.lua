@@ -1,7 +1,9 @@
 local runtime = dofile("test/integration/runtime.lua")
 local lfs = require("lfs")
 
-local function quote(text) return "'" .. text:gsub("'", "'\\''") .. "'" end
+local function quote(text)
+    return "'" .. text:gsub("'", "'\\''") .. "'"
+end
 local function read(path)
     local file = assert(io.open(path, "r"))
     local text = file:read("*a")
@@ -16,7 +18,9 @@ end
 local function removeTree(path)
     if lfs.attributes(path, "mode") == "directory" then
         for name in lfs.dir(path) do
-            if name ~= "." and name ~= ".." then removeTree(path .. "/" .. name) end
+            if name ~= "." and name ~= ".." then
+                removeTree(path .. "/" .. name)
+            end
         end
         assert(lfs.rmdir(path))
     else
@@ -27,8 +31,12 @@ local function fixture()
     local root = os.tmpname()
     os.remove(root)
     assert(lfs.mkdir(root))
-    runtime.cleanup(function() removeTree(root) end)
-    for _, dir in ipairs({ "out", "patches", "src", "spec" }) do assert(lfs.mkdir(root .. "/" .. dir)) end
+    runtime.cleanup(function()
+        removeTree(root)
+    end)
+    for _, dir in ipairs({ "out", "patches", "src", "spec" }) do
+        assert(lfs.mkdir(root .. "/" .. dir))
+    end
     write(root .. "/main.lua", "return true")
     write(root .. "/_meta.lua", "return {}")
     write(root .. "/src/module.lua", "return {}")
@@ -40,8 +48,15 @@ local function fixture()
     return root
 end
 local function build(root, prefix)
-    return os.execute("cd " .. quote(root) .. " && " .. (prefix or "")
-        .. " OUTPUT_DIR=" .. quote(root .. "/out") .. " bash package.bash > build.log 2>&1") == 0
+    return os.execute(
+        "cd "
+            .. quote(root)
+            .. " && "
+            .. (prefix or "")
+            .. " OUTPUT_DIR="
+            .. quote(root .. "/out")
+            .. " bash package.bash > build.log 2>&1"
+    ) == 0
 end
 local function entries(path)
     local pipe = assert(io.popen("unzip -Z1 " .. quote(path)))
@@ -70,8 +85,10 @@ runtime.test("ZIP failure fails the build even when an older artifact exists", f
     local zip = assert(pipe:read("*l"))
     pipe:close()
     assert(lfs.mkdir(root .. "/bin"))
-    write(root .. "/bin/zip", "#!/bin/sh\ncase \"$*\" in *kobo-patches.zip*) exit 1 ;; esac\nexec "
-        .. quote(zip) .. " \"$@\"\n")
+    write(
+        root .. "/bin/zip",
+        '#!/bin/sh\ncase "$*" in *kobo-patches.zip*) exit 1 ;; esac\nexec ' .. quote(zip) .. ' "$@"\n'
+    )
     assert(os.execute("chmod +x " .. quote(root .. "/bin/zip")) == 0)
     assert(not build(root, "PATH=" .. quote(root .. "/bin") .. ':"$PATH"'), "ZIP failure was reported as success")
 end)

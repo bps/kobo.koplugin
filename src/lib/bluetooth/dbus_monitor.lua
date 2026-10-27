@@ -6,12 +6,12 @@
 --- This provides event-driven detection of device connections, disconnections, and
 --- RSSI changes without continuous polling of device state.
 
-local UIManager = require("ui/uimanager")
 local MonitorProcess = require("src/lib/bluetooth/monitor_process")
+local UIManager = require("ui/uimanager")
 local logger = require("logger")
 
 local DbusMonitor = {
-    monitor_pipe = nil,
+    process = nil,
     monitor_fd = nil,
     property_callbacks = {}, -- key -> {callback = function, priority = number}
     sorted_callbacks = {}, -- array of {key, callback, priority} sorted by priority
@@ -110,9 +110,13 @@ function DbusMonitor:_spawnProcess()
 end
 
 function DbusMonitor:startMonitoring()
-    if self.is_active then return true end
+    if self.is_active then
+        return true
+    end
     self.process = self:_spawnProcess()
-    if not self.process then return false end
+    if not self.process then
+        return false
+    end
     self.monitor_fd = self.process.fd
     self.is_active = true
     self:_schedulePoll()
@@ -167,7 +171,9 @@ end
 
 --- Reads bounded chunks without mixing stdio buffers and kernel readiness.
 function DbusMonitor:_pollForEvents()
-    if not self.process then return end
+    if not self.process then
+        return
+    end
     for _ = 1, 16 do
         local chunk = self.process:read()
         if chunk == nil then
@@ -196,7 +202,9 @@ function DbusMonitor:_consumeChunk(chunk)
     end
     while true do
         local ending = self.pending:find("\n", 1, true)
-        if not ending then return end
+        if not ending then
+            return
+        end
         local line = self.pending:sub(1, ending - 1)
         self.pending = self.pending:sub(ending + 1)
         self:_processSignalLine(line)
@@ -220,7 +228,9 @@ function DbusMonitor:_processSignalLine(line)
         self.depth = 0
         return true
     end
-    if #self.current_signal == 0 then return false end
+    if #self.current_signal == 0 then
+        return false
+    end
     table.insert(self.current_signal, line)
     self.signal_bytes = self.signal_bytes + #line
     local quoted, escaped = false, false

@@ -269,8 +269,14 @@ function KoboStateWriter.write(db_path, book_id, percent_read, timestamp, status
             assert(updateChapterProgress(conn, target_content_id, chapter_percent), "Chapter update failed")
         end
         assert(
-            updateMainBookEntry(conn, book_id, percent_read, formatKoboTimestamp(timestamp),
-                read_status, chapter_id_bookmarked),
+            updateMainBookEntry(
+                conn,
+                book_id,
+                percent_read,
+                formatKoboTimestamp(timestamp),
+                read_status,
+                chapter_id_bookmarked
+            ),
             "Book update failed"
         )
         conn:exec("COMMIT")

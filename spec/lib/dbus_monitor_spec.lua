@@ -6,7 +6,6 @@ require("spec.helper")
 describe("DbusMonitor", function()
     local DbusMonitor
     local UIManager
-    local mock_pipe
     local mock_fd
 
     setup(function()
@@ -21,14 +20,6 @@ describe("DbusMonitor", function()
 
         -- Mock file descriptor
         mock_fd = 42
-
-        -- Mock pipe object
-        mock_pipe = {
-            read = function()
-                return nil
-            end,
-            close = function() end,
-        }
 
         -- Process startup is stubbed only by lifecycle tests.
     end)
@@ -188,11 +179,22 @@ describe("DbusMonitor", function()
         local spawn, process, closed
         before_each(function()
             closed = 0
-            process = { fd = mock_fd, read = function() return nil end,
-                close = function() closed = closed + 1 end }
-            spawn = stub(DbusMonitor, "_spawnProcess", function() return process end)
+            process = {
+                fd = mock_fd,
+                read = function()
+                    return nil
+                end,
+                close = function()
+                    closed = closed + 1
+                end,
+            }
+            spawn = stub(DbusMonitor, "_spawnProcess", function()
+                return process
+            end)
         end)
-        after_each(function() spawn:revert() end)
+        after_each(function()
+            spawn:revert()
+        end)
 
         it("starts an owned process and schedules polling once", function()
             local monitor = DbusMonitor:new()
@@ -207,7 +209,9 @@ describe("DbusMonitor", function()
 
         it("does not schedule polling if spawning fails", function()
             spawn:revert()
-            spawn = stub(DbusMonitor, "_spawnProcess", function() return nil end)
+            spawn = stub(DbusMonitor, "_spawnProcess", function()
+                return nil
+            end)
             local monitor = DbusMonitor:new()
             assert.is_false(monitor:startMonitoring())
             assert.is_false(monitor:isActive())
@@ -227,7 +231,9 @@ describe("DbusMonitor", function()
         end)
 
         it("stops and closes the process on EOF", function()
-            process.read = function() return false end
+            process.read = function()
+                return false
+            end
             local monitor = DbusMonitor:new()
             monitor:startMonitoring()
             monitor:_pollForEvents()

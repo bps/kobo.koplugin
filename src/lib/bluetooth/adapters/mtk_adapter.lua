@@ -4,8 +4,8 @@
 --- Uses com.kobo.mtk.bluedroid D-Bus service.
 --- Handles D-Bus command execution and communication with the MTK Bluetooth stack.
 
-local WmtPower = require("src/lib/bluetooth/wmt_power")
 local Subprocess = require("src/lib/bluetooth/subprocess")
+local WmtPower = require("src/lib/bluetooth/wmt_power")
 local ffiutil = require("ffi/util")
 local logger = require("logger")
 
