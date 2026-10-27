@@ -26,6 +26,7 @@ jobs:
             **/*.lua
             spec/**/*_spec.lua
             test/**
+            package.sh
             .busted
             .github/workflows/test.yml
 
@@ -45,7 +46,7 @@ jobs:
       - name: Install native test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y luajit lua-filesystem libarchive-dev libsqlite3-dev
+          sudo apt-get install -y luajit lua-filesystem libarchive-dev libsqlite3-dev zip unzip
       - name: Run tests without the unit-test mocks
         env:
           KOREADER_BASE: ${{ github.workspace }}/.native-runtime/koreader-base

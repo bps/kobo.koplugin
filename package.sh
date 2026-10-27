@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 # Define variables
 PLUGIN_NAME="kobo"
-OUTPUT_DIR="/tmp"
+OUTPUT_DIR="${OUTPUT_DIR:-/tmp}"
 WORK_DIR=$(mktemp -d)
 
 # Cleanup on exit
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 echo "Starting package process..."
+mkdir -p "$OUTPUT_DIR"
 
 # Create the plugin directory structure
 mkdir -p "$WORK_DIR/$PLUGIN_NAME.koplugin"
@@ -46,7 +47,7 @@ cp -r "$WORK_DIR/$PLUGIN_NAME.koplugin" "$OUTPUT_DIR/"
 # Create ZIP archive
 echo "Creating ZIP archive..."
 cd "$WORK_DIR"
-zip -r "$PLUGIN_NAME.koplugin.zip" "$PLUGIN_NAME.koplugin" -i '*.lua' '*.md' '*LICENSE' > /dev/null 2>&1 || true
+zip -r "$PLUGIN_NAME.koplugin.zip" "$PLUGIN_NAME.koplugin" -i '*.lua' '*.md' '*LICENSE' > /dev/null
 cd - > /dev/null
 
 # Copy ZIP to output directory
@@ -60,8 +61,9 @@ cp -r "$WORK_DIR/$PLUGIN_NAME.koplugin/patches" "$OUTPUT_DIR/kobo-patches"
 # Create patches-only archive
 echo "Creating patches-only archive..."
 cd "$WORK_DIR/$PLUGIN_NAME.koplugin/patches"
-zip -r "$OUTPUT_DIR/kobo-patches.zip" . > /dev/null 2>&1 || true
+zip -r "$WORK_DIR/kobo-patches.zip" . > /dev/null
 cd - > /dev/null
+cp "$WORK_DIR/kobo-patches.zip" "$OUTPUT_DIR/"
 
 echo ""
 echo "✓ Packaging complete!"

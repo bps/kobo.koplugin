@@ -16,7 +16,7 @@ Required dependencies:
 
 - LuaJIT and LuaFileSystem for its Lua 5.1 ABI
 - Native libarchive and SQLite libraries discoverable by the dynamic loader
-- Bash, `timeout` (GNU coreutils on macOS), and standard POSIX shell commands
+- Bash, `timeout` (GNU coreutils on macOS), `zip`, `unzip`, and standard POSIX shell commands
 - A koreader-base source checkout
 
 CI pins the runtime source to `cd173c179a56b42ddbf06b6ac3eafec099ffe219`. To run the same suite:
@@ -41,6 +41,7 @@ The tests cover:
 - Detecting native archive close failures and failed publication
 - Non-blocking split-message reads, final-message delivery, EOF and owned-process cleanup
 - Atomic reading-state writes under real SQLite failures and contention
+- Fresh release ZIPs, required runtime files and propagation of packaging errors
 
 Hardware smoke tests remain necessary for radio bring-up, suspend/resume and device-specific
 Bluetooth behavior.
