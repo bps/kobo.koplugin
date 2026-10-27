@@ -8,6 +8,7 @@
 --- 4. Creating decrypted EPUB/KEPUB files
 
 local Archiver = require("ffi/archiver")
+local ArchiveWriter = require("src/lib/drm/archive_writer")
 local FileDecryptor = require("src/lib/drm/file_decryptor")
 local KeyDerivation = require("src/lib/drm/key_derivation")
 local SQ3 = require("lua-ljsqlite3/init")
@@ -337,69 +338,48 @@ function KoboKDRM:decryptBook(book_id, input_path, output_path, kobo_dir, db_pat
 
     logger.dbg("KoboKDRM: Decrypted", keys_count, "content keys")
 
-    logger.dbg("KoboKDRM: Processing book archive...")
     local input_arc = Archiver.Reader:new()
-    if not input_arc:open(input_path) then
-        return false, "Could not open input archive"
-    end
-
     local output_arc = Archiver.Writer:new()
-    if not output_arc:open(output_path, "zip") then
-        input_arc:close()
+    local temporary
+    local ok, err = pcall(function()
+        assert(input_arc:open(input_path), "Could not open input archive")
+        local temp_err
+        temporary, temp_err = ArchiveWriter.createTemporary(output_path)
+        assert(temporary, temp_err)
+        assert(output_arc:open(temporary, "zip"), "Could not create output archive")
 
-        return false, "Could not create output archive"
-    end
-
-    local files_decrypted = 0
-    local files_copied = 0
-    local files_failed = 0
-
-    for entry in input_arc:iterate() do
-        local file_path = entry.path
-        local file_content = input_arc:extractToMemory(entry.index)
-
-        if not file_content then
-            logger.warn("KoboKDRM: Could not read file:", file_path)
-            files_failed = files_failed + 1
-        else
-            if decrypted_keys[file_path] then
-                logger.dbg("KoboKDRM: Decrypting:", file_path)
-
-                local decrypted_content = FileDecryptor:decryptFileContent(file_content, decrypted_keys[file_path])
-                if decrypted_content then
-                    output_arc:addFileFromMemory(file_path, decrypted_content)
-                    files_decrypted = files_decrypted + 1
-                else
-                    logger.warn("KoboKDRM: Failed to decrypt:", file_path)
-                    output_arc:addFileFromMemory(file_path, file_content)
-                    files_failed = files_failed + 1
+        for entry in input_arc:iterate() do
+            if entry.mode ~= "directory" then
+                assert(entry.mode == "file", "Unsupported archive entry: " .. entry.path)
+                local content = assert(input_arc:extractToMemory(entry.index), "Could not read: " .. entry.path)
+                if content_keys_map[entry.path] then
+                    local key = assert(decrypted_keys[entry.path], "Could not decrypt key: " .. entry.path)
+                    content = assert(FileDecryptor:decryptFileContent(content, key), "Could not decrypt: " .. entry.path)
                 end
-            else
-                output_arc:addFileFromMemory(file_path, file_content)
-                files_copied = files_copied + 1
+                -- EPUB's mimetype entry must not be compressed.
+                assert(output_arc:setZipCompression(entry.path == "mimetype" and "store" or "deflate"))
+                assert(output_arc:addFileFromMemory(entry.path, content), "Could not write: " .. entry.path)
             end
         end
+        assert(not input_arc.err, input_arc.err)
+        local closed, close_err = ArchiveWriter.close(output_arc)
+        assert(closed, close_err or "Could not finalize output archive")
+        local published, publish_err = ArchiveWriter.publish(temporary, output_path)
+        assert(published, publish_err)
+    end)
+
+    -- Also run cleanup after thrown library errors, not just false return values.
+    pcall(input_arc.close, input_arc)
+    pcall(output_arc.close, output_arc)
+    if temporary then
+        os.remove(temporary)
     end
 
-    input_arc:close()
-    output_arc:close()
-
-    logger.info(
-        "KoboKDRM: Decrypted book",
-        book_id,
-        "- files:",
-        files_decrypted,
-        "copied:",
-        files_copied,
-        "failed:",
-        files_failed
-    )
-
-    if files_failed > 0 then
-        return true, string.format("Decrypted with %d failures", files_failed)
+    if not ok then
+        logger.warn("KoboKDRM: Decryption failed:", err)
+        return false, tostring(err)
     end
-
-    return true, nil
+    return true
 end
 
 return KoboKDRM

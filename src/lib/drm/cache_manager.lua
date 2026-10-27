@@ -70,13 +70,7 @@ function CacheManager:ensureCachePath(book_id, cache_dir)
         return nil
     end
 
-    logger.dbg("CacheManager: Ensuring cache file exists:", full_path)
-
-    local file = io.open(full_path, "w")
-    if file then
-        file:close()
-    end
-
+    -- Resolving a cache path must not create or truncate the book stored there.
     return full_path
 end
 
