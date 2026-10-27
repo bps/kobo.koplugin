@@ -45,6 +45,8 @@
 
 # Developer Guide
 
+- [Testing](./dev/testing.md)
+
 - [High-Level Architecture](./dev/architecture/00-overview.md)
   - [Architecture Overview](./dev/architecture/01-high-level.md)
 - [Virtual Library](./dev/virtual-library/index.md)

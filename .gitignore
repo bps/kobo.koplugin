@@ -17,3 +17,4 @@ mermaid.min.js
 .lua
 .luarocks
 .tmp
+.native-runtime/

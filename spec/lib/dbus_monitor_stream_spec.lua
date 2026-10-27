@@ -45,6 +45,16 @@ describe("D-Bus monitor stream safety", function()
         assert.are.equal(2, #calls)
     end)
 
+    it("does not attach a late invalidated array to the next signal", function()
+        local cut = assert(signal:find("   ]\n", 1, true)) + #"   ]\n" - 1
+        monitor:_consumeChunk(signal:sub(1, cut))
+        monitor:_flushSignal()
+        assert.are.equal(1, #calls)
+        monitor:_consumeChunk(signal:sub(cut + 1) .. signal)
+        monitor:_flushSignal()
+        assert.are.equal(2, #calls)
+    end)
+
     it("bounds malformed output and resynchronizes at the next header", function()
         monitor:_consumeChunk(string.rep("x", 70000))
         monitor:_consumeChunk(signal)
