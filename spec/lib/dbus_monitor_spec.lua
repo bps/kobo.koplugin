@@ -30,11 +30,7 @@ describe("DbusMonitor", function()
             close = function() end,
         }
 
-        -- Mock io.popen
-        _G.io = _G.io or {}
-        _G.io.popen = function()
-            return mock_pipe
-        end
+        -- Process startup is stubbed only by lifecycle tests.
     end)
 
     after_each(function()
@@ -188,153 +184,55 @@ describe("DbusMonitor", function()
         end)
     end)
 
-    describe("startMonitoring", function()
-        local active_monitors = {}
-
-        after_each(function()
-            -- Clean up all monitors created during tests
-            for _, monitor in ipairs(active_monitors) do
-                if monitor:isActive() then
-                    monitor:stopMonitoring()
-                end
-            end
-            active_monitors = {}
+    describe("monitor lifecycle", function()
+        local spawn, process, closed
+        before_each(function()
+            closed = 0
+            process = { fd = mock_fd, read = function() return nil end,
+                close = function() closed = closed + 1 end }
+            spawn = stub(DbusMonitor, "_spawnProcess", function() return process end)
         end)
+        after_each(function() spawn:revert() end)
 
-        it("should start monitoring successfully", function()
+        it("starts an owned process and schedules polling once", function()
             local monitor = DbusMonitor:new()
-            table.insert(active_monitors, monitor)
-
-            -- Stub the _getFileDescriptor method
-            local fd_stub = stub(monitor, "_getFileDescriptor")
-            fd_stub.invokes(function()
-                return mock_fd
-            end)
-
-            local result = monitor:startMonitoring()
-
-            assert.is_true(result)
+            assert.is_true(monitor:startMonitoring())
+            assert.is_true(monitor:startMonitoring())
             assert.is_true(monitor:isActive())
-            assert.is_not_nil(monitor.monitor_pipe)
-            assert.equals(mock_fd, monitor.monitor_fd)
-
-            fd_stub:revert()
-        end)
-
-        it("should schedule polling task", function()
-            local monitor = DbusMonitor:new()
-            table.insert(active_monitors, monitor)
-
-            local fd_stub = stub(monitor, "_getFileDescriptor")
-            fd_stub.invokes(function()
-                return mock_fd
-            end)
-
-            monitor:startMonitoring()
-
-            assert.is_not_nil(monitor.poll_task)
-            assert.is_true(#UIManager._scheduled_tasks > 0)
-
-            fd_stub:revert()
-        end)
-
-        it("should return true if already monitoring", function()
-            local monitor = DbusMonitor:new()
-            table.insert(active_monitors, monitor)
-
-            local fd_stub = stub(monitor, "_getFileDescriptor")
-            fd_stub.invokes(function()
-                return mock_fd
-            end)
-
-            monitor:startMonitoring()
-            local result = monitor:startMonitoring()
-
-            assert.is_true(result)
-
-            fd_stub:revert()
-        end)
-
-        it("should handle popen failure", function()
-            _G.io.popen = function()
-                return nil
-            end
-
-            local monitor = DbusMonitor:new()
-            local result = monitor:startMonitoring()
-
-            assert.is_false(result)
-            assert.is_false(monitor:isActive())
-        end)
-
-        it("should handle fileno failure", function()
-            local monitor = DbusMonitor:new()
-            table.insert(active_monitors, monitor)
-
-            -- Stub to return error
-            local fd_stub = stub(monitor, "_getFileDescriptor")
-            fd_stub.invokes(function()
-                return -1
-            end)
-
-            local result = monitor:startMonitoring()
-
-            assert.is_false(result)
-            assert.is_false(monitor:isActive())
-
-            fd_stub:revert()
-        end)
-    end)
-
-    describe("stopMonitoring", function()
-        it("should stop monitoring", function()
-            local monitor = DbusMonitor:new()
-
-            -- Direct function replacement instead of stub
-            local original_getfd = monitor._getFileDescriptor
-            monitor._getFileDescriptor = function()
-                return mock_fd
-            end
-
-            monitor:startMonitoring()
-            assert.is_true(monitor:isActive())
-
-            -- Restore original
-            monitor._getFileDescriptor = original_getfd
-
+            assert.are.equal(process, monitor.process)
+            assert.are.equal(mock_fd, monitor.monitor_fd)
+            assert.are.equal(1, #UIManager._scheduled_tasks)
             monitor:stopMonitoring()
-
-            assert.is_false(monitor:isActive())
-            assert.is_nil(monitor.monitor_pipe)
-            assert.is_nil(monitor.monitor_fd)
         end)
 
-        it("should unschedule poll task", function()
+        it("does not schedule polling if spawning fails", function()
+            spawn:revert()
+            spawn = stub(DbusMonitor, "_spawnProcess", function() return nil end)
             local monitor = DbusMonitor:new()
-
-            -- Direct function replacement instead of stub
-            local original_getfd = monitor._getFileDescriptor
-            monitor._getFileDescriptor = function()
-                return mock_fd
-            end
-
-            monitor:startMonitoring()
-
-            assert.is_not_nil(monitor.poll_task)
-
-            -- Restore original
-            monitor._getFileDescriptor = original_getfd
-
-            monitor:stopMonitoring()
-
+            assert.is_false(monitor:startMonitoring())
+            assert.is_false(monitor:isActive())
             assert.is_nil(monitor.poll_task)
         end)
 
-        it("should handle stopping when not active", function()
+        it("closes its process, clears state and unschedules polling idempotently", function()
             local monitor = DbusMonitor:new()
-
-            monitor:stopMonitoring() -- Should not error
+            monitor:startMonitoring()
+            monitor:stopMonitoring()
+            monitor:stopMonitoring()
             assert.is_false(monitor:isActive())
+            assert.is_nil(monitor.process)
+            assert.is_nil(monitor.monitor_fd)
+            assert.is_nil(monitor.poll_task)
+            assert.are.equal(1, closed)
+        end)
+
+        it("stops and closes the process on EOF", function()
+            process.read = function() return false end
+            local monitor = DbusMonitor:new()
+            monitor:startMonitoring()
+            monitor:_pollForEvents()
+            assert.is_false(monitor:isActive())
+            assert.are.equal(1, closed)
         end)
     end)
 

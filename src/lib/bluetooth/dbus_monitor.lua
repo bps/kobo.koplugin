@@ -7,13 +7,8 @@
 --- RSSI changes without continuous polling of device state.
 
 local UIManager = require("ui/uimanager")
-local bit = require("bit")
-local ffi = require("ffi")
+local MonitorProcess = require("src/lib/bluetooth/monitor_process")
 local logger = require("logger")
-
-require("ffi/posix_h")
-
-local C = ffi.C
 
 local DbusMonitor = {
     monitor_pipe = nil,
@@ -30,8 +25,11 @@ local DbusMonitor = {
 --- @return table New DbusMonitor instance
 function DbusMonitor:new()
     local instance = {
-        monitor_pipe = nil,
+        process = nil,
         monitor_fd = nil,
+        pending = "",
+        signal_bytes = 0,
+        depth = 0,
         property_callbacks = {}, -- key -> {callback = function, priority = number}
         sorted_callbacks = {}, -- array of {key, callback, priority} sorted by priority
         is_active = false,
@@ -106,90 +104,36 @@ function DbusMonitor:_rebuildSortedCallbacks()
     logger.dbg("DbusMonitor: Rebuilt sorted callbacks list,", #self.sorted_callbacks, "callbacks")
 end
 
---- @todo check if the ffiutil.runInSubProcess can be used instead
--- Starts monitoring D-Bus signals for Bluetooth device property changes.
--- @return boolean True if monitoring started successfully, false otherwise
+--- Starts an owned monitor subprocess.
+function DbusMonitor:_spawnProcess()
+    return MonitorProcess.start()
+end
+
 function DbusMonitor:startMonitoring()
-    if self.is_active then
-        logger.dbg("DbusMonitor: Already monitoring")
-
-        return true
-    end
-
-    local cmd =
-        "dbus-monitor --system \"type='signal',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'\""
-
-    logger.info("DbusMonitor: Starting dbus-monitor")
-
-    self.monitor_pipe = io.popen(cmd)
-
-    if not self.monitor_pipe then
-        logger.warn("DbusMonitor: Failed to start dbus-monitor")
-
-        return false
-    end
-
-    self.monitor_fd = self:_getFileDescriptor(self.monitor_pipe)
-
-    if self.monitor_fd < 0 then
-        logger.warn("DbusMonitor: Failed to get file descriptor")
-        self.monitor_pipe:close()
-        self.monitor_pipe = nil
-
-        return false
-    end
-
-    logger.info("DbusMonitor: Started monitoring, fd:", self.monitor_fd)
-
+    if self.is_active then return true end
+    self.process = self:_spawnProcess()
+    if not self.process then return false end
+    self.monitor_fd = self.process.fd
     self.is_active = true
     self:_schedulePoll()
-
     return true
 end
 
----
---- Gets the file descriptor from a file handle (for testing override).
---- @param file_handle userdata File handle from io.popen
---- @return number File descriptor or -1 on error
-function DbusMonitor:_getFileDescriptor(file_handle)
-    return C.fileno(file_handle)
-end
-
----
---- Stops monitoring D-Bus signals.
---- TODO: It would be better to keep track of the dbus-monitor process and terminate it directly
 function DbusMonitor:stopMonitoring()
-    if not self.is_active then
-        return
-    end
-
-    logger.info("DbusMonitor: Stopping monitoring")
-
     self.is_active = false
-
     if self.poll_task then
         UIManager:unschedule(self.poll_task)
         self.poll_task = nil
     end
-
-    if self.monitor_pipe then
-        logger.dbg("DbusMonitor: terminating dbus-monitor and closing monitor pipe")
-
-        local ok, res = pcall(os.execute, 'pkill -TERM -f "dbus-monitor --system" >/dev/null 2>&1')
-        if not ok then
-            logger.warn("DbusMonitor: failed to invoke pkill:", res)
-        else
-            logger.dbg("DbusMonitor: pkill invoked to terminate dbus-monitor")
-        end
-
-        self.monitor_pipe:close()
-        self.monitor_pipe = nil
+    if self.process then
+        self.process:close()
+        self.process = nil
     end
-
     self.monitor_fd = nil
     self.current_signal = {}
-
-    logger.dbg("DbusMonitor: Stopped monitoring")
+    self.pending = ""
+    self.signal_bytes = 0
+    self.depth = 0
 end
 
 ---
@@ -207,7 +151,7 @@ function DbusMonitor:_schedulePoll()
     end
 
     self.poll_task = function()
-        if not self.is_active or not self.monitor_pipe or not self.monitor_fd then
+        if not self.is_active or not self.process then
             return
         end
 
@@ -221,92 +165,84 @@ function DbusMonitor:_schedulePoll()
     UIManager:scheduleIn(0.1, self.poll_task)
 end
 
----
---- Polls for D-Bus signal events using non-blocking I/O.
---- Uses poll() system call to check if data is available before reading.
+--- Reads bounded chunks without mixing stdio buffers and kernel readiness.
 function DbusMonitor:_pollForEvents()
-    if not self.monitor_fd or self.monitor_fd < 0 then
-        logger.dbg("DbusMonitor: Invalid file descriptor, stopping")
-        self:stopMonitoring()
-
-        return
-    end
-
-    local pollfd = ffi.new("struct pollfd[1]")
-    pollfd[0].fd = self.monitor_fd
-    pollfd[0].events = C.POLLIN
-    pollfd[0].revents = 0
-
-    local result = C.poll(pollfd, 1, 0)
-
-    if result < 0 then
-        logger.warn("DbusMonitor: Poll error, errno:", ffi.errno())
-        self:stopMonitoring()
-
-        return
-    end
-
-    if result == 0 then
-        return
-    end
-
-    if bit.band(pollfd[0].revents, C.POLLERR) ~= 0 or bit.band(pollfd[0].revents, C.POLLHUP) ~= 0 then
-        logger.warn("DbusMonitor: Poll error or hangup detected")
-        self:stopMonitoring()
-
-        return
-    end
-
-    while true do
-        if bit.band(pollfd[0].revents, C.POLLIN) == 0 then
+    if not self.process then return end
+    for _ = 1, 16 do
+        local chunk = self.process:read()
+        if chunk == nil then
+            -- dbus-monitor does not separate every message with a blank line.
+            -- Wait for a quiet poll before dispatching the last balanced message.
+            self:_flushSignal()
+            return
+        elseif chunk == false then
+            self:_flushSignal()
+            self:stopMonitoring()
             return
         end
-
-        local line = self.monitor_pipe:read("*l")
-
-        if not line then
-            return
-        end
-
-        if self:_processSignalLine(line) then
-            return
-        end
+        self:_consumeChunk(chunk)
     end
 end
 
----
---- Processes a single line from the D-Bus monitor output.
---- Accumulates lines until a complete signal is detected.
---- @param line string A line of output from dbus-monitor
---- @return boolean if a signal block has been processed or not
-function DbusMonitor:_processSignalLine(line)
-    logger.dbg("DbusMonitor: processing signal line", line)
-
-    if line:match("^signal sender=") then
-        if #self.current_signal > 1 then
-            self:_parseAndDispatchSignal(self.current_signal)
-        end
-
-        self.current_signal = { line }
-        logger.dbg("DbusMonitor: New signal started")
-
-        return true
-    end
-
-    if #self.current_signal > 0 then
-        table.insert(self.current_signal, line)
-    end
-
-    if line:match("^%s*$") then
-        if #self.current_signal > 1 then
-            self:_parseAndDispatchSignal(self.current_signal)
-        end
-
+function DbusMonitor:_consumeChunk(chunk)
+    self.pending = self.pending .. chunk
+    if #self.pending + self.signal_bytes > 65536 then
+        self.pending = ""
         self.current_signal = {}
+        self.signal_bytes = 0
+        self.depth = 0
+        logger.warn("DbusMonitor: Dropping oversized signal")
+        return
+    end
+    while true do
+        local ending = self.pending:find("\n", 1, true)
+        if not ending then return end
+        local line = self.pending:sub(1, ending - 1)
+        self.pending = self.pending:sub(ending + 1)
+        self:_processSignalLine(line)
+    end
+end
 
+function DbusMonitor:_flushSignal(at_boundary)
+    if (at_boundary or self.pending == "") and self.depth == 0 and #self.current_signal > 1 then
+        self:_parseAndDispatchSignal(self.current_signal)
+        self.current_signal = {}
+        self.signal_bytes = 0
+    end
+end
+
+--- Tracks nested D-Bus containers without counting brackets in quoted values.
+function DbusMonitor:_processSignalLine(line)
+    if line:match("^signal%s") then
+        self:_flushSignal(true)
+        self.current_signal = { line }
+        self.signal_bytes = #line
+        self.depth = 0
         return true
     end
-
+    if #self.current_signal == 0 then return false end
+    table.insert(self.current_signal, line)
+    self.signal_bytes = self.signal_bytes + #line
+    local quoted, escaped = false, false
+    for character in line:gmatch(".") do
+        if escaped then
+            escaped = false
+        elseif quoted and character == "\\" then
+            escaped = true
+        elseif character == '"' then
+            quoted = not quoted
+        elseif not quoted then
+            if character == "[" or character == "(" or character == "{" then
+                self.depth = self.depth + 1
+            elseif character == "]" or character == ")" or character == "}" then
+                self.depth = self.depth - 1
+            end
+        end
+    end
+    if line:match("^%s*$") then
+        self:_flushSignal(true)
+        return true
+    end
     return false
 end
 
