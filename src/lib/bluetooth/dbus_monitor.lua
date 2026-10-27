@@ -30,6 +30,7 @@ function DbusMonitor:new()
         pending = "",
         signal_bytes = 0,
         depth = 0,
+        saw_array = false,
         property_callbacks = {}, -- key -> {callback = function, priority = number}
         sorted_callbacks = {}, -- array of {key, callback, priority} sorted by priority
         is_active = false,
@@ -138,6 +139,7 @@ function DbusMonitor:stopMonitoring()
     self.pending = ""
     self.signal_bytes = 0
     self.depth = 0
+    self.saw_array = false
 end
 
 ---
@@ -197,6 +199,7 @@ function DbusMonitor:_consumeChunk(chunk)
         self.current_signal = {}
         self.signal_bytes = 0
         self.depth = 0
+        self.saw_array = false
         logger.warn("DbusMonitor: Dropping oversized signal")
         return
     end
@@ -212,10 +215,16 @@ function DbusMonitor:_consumeChunk(chunk)
 end
 
 function DbusMonitor:_flushSignal(at_boundary)
-    if (at_boundary or self.pending == "") and self.depth == 0 and #self.current_signal > 1 then
+    if
+        (at_boundary or self.pending == "")
+        and (at_boundary or self.saw_array)
+        and self.depth == 0
+        and #self.current_signal > 1
+    then
         self:_parseAndDispatchSignal(self.current_signal)
         self.current_signal = {}
         self.signal_bytes = 0
+        self.saw_array = false
     end
 end
 
@@ -226,6 +235,7 @@ function DbusMonitor:_processSignalLine(line)
         self.current_signal = { line }
         self.signal_bytes = #line
         self.depth = 0
+        self.saw_array = false
         return true
     end
     if #self.current_signal == 0 then
@@ -242,6 +252,9 @@ function DbusMonitor:_processSignalLine(line)
         elseif character == '"' then
             quoted = not quoted
         elseif not quoted then
+            if character == "[" then
+                self.saw_array = true
+            end
             if character == "[" or character == "(" or character == "{" then
                 self.depth = self.depth + 1
             elseif character == "]" or character == ")" or character == "}" then

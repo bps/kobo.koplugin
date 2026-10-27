@@ -40,6 +40,15 @@ describe("D-Bus monitor stream safety", function()
         assert.are.equal(1, #calls)
     end)
 
+    it("retains a header and interface during an idle poll before the first array arrives", function()
+        local cut = assert(signal:find("   array [", 1, true)) - 1
+        monitor:_consumeChunk(signal:sub(1, cut))
+        monitor:_flushSignal()
+        monitor:_consumeChunk(signal:sub(cut + 1))
+        monitor:_flushSignal()
+        assert.are.equal(1, #calls)
+    end)
+
     it("drains several messages in one chunk without losing buffered bodies", function()
         monitor:_consumeChunk(signal .. signal)
         monitor:_flushSignal()

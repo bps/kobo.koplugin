@@ -2,7 +2,9 @@
 # A private stand-in for the command, not the host system bus.
 printf '%s' 'signal time=1.0 sender=:1.42 path=/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF; interface=org.freedesktop.DBus.Properties; member=PropertiesChanged
    string "org.bluez.Device1"
-   array [
+'
+sleep 0.05
+printf '%s' '   array [
       dict entry(
          string "Connected"
          variant boolean tru'
