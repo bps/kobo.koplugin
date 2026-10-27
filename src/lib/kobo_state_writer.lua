@@ -188,6 +188,9 @@ local function updateChapterProgress(conn, content_id, chapter_percent)
         stmt:reset():bind(math.floor(chapter_percent), content_id):step()
     end)
 
+    local closed, close_err = pcall(stmt.close, stmt)
+    ok, err = ok and closed, err or close_err
+
     if ok then
         logger.dbg("KoboPlugin: Updated chapter progress:", content_id, "chapter_percent:", math.floor(chapter_percent))
         return true
@@ -220,6 +223,9 @@ local function updateMainBookEntry(conn, book_id, percent_read, date_str, read_s
         stmt:reset():bind(math.floor(percent_read), date_str, read_status, chapter_id_bookmarked, book_id):step()
     end)
 
+    local closed, close_err = pcall(stmt.close, stmt)
+    ok, err = ok and closed, err or close_err
+
     if not ok then
         logger.warn("KoboPlugin: Error executing update for book:", book_id, "error:", err)
         return false
@@ -241,34 +247,47 @@ function KoboStateWriter.write(db_path, book_id, percent_read, timestamp, status
         return false
     end
 
-    local conn = SQ3.open(db_path)
-    if not conn then
-        logger.warn("KoboPlugin: Failed to open Kobo database for book:", book_id)
-        return false
-    end
-
-    percent_read = tonumber(percent_read) or 0
-    local date_str = formatKoboTimestamp(timestamp)
+    local conn
+    local transaction = false
+    local chapter_id_bookmarked, chapter_percent
     local read_status = status and StatusConverter.koreaderToKobo(status) or 1
+    percent_read = tonumber(percent_read) or 0
+    local success, err = pcall(function()
+        -- Never create a new empty database when the configured path is wrong.
+        conn = assert(SQ3.open(db_path, "rw"), "Could not open Kobo database")
+        conn:set_busy_timeout(250)
+        conn:exec("BEGIN IMMEDIATE")
+        transaction = true
 
-    local chapter_id_bookmarked, chapter_percent, target_content_id =
-        findChapterForPercentage(conn, book_id, percent_read)
+        local target_content_id
+        chapter_id_bookmarked, chapter_percent, target_content_id =
+            findChapterForPercentage(conn, book_id, percent_read)
+        chapter_id_bookmarked = chapter_id_bookmarked or ""
+        chapter_percent = chapter_percent or 0
 
-    chapter_id_bookmarked = chapter_id_bookmarked or ""
-    chapter_percent = chapter_percent or 0
+        if target_content_id then
+            assert(updateChapterProgress(conn, target_content_id, chapter_percent), "Chapter update failed")
+        end
+        assert(
+            updateMainBookEntry(conn, book_id, percent_read, formatKoboTimestamp(timestamp),
+                read_status, chapter_id_bookmarked),
+            "Book update failed"
+        )
+        conn:exec("COMMIT")
+        transaction = false
+    end)
 
-    if target_content_id and type(target_content_id) == "string" then
-        updateChapterProgress(conn, target_content_id, chapter_percent)
+    if conn then
+        if transaction then
+            pcall(conn.exec, conn, "ROLLBACK")
+        end
+        local closed, close_err = pcall(conn.close, conn)
+        success, err = success and closed, err or close_err
     end
-
-    local success = updateMainBookEntry(conn, book_id, percent_read, date_str, read_status, chapter_id_bookmarked)
-
-    conn:close()
 
     if not success then
-        logger.warn("KoboPlugin: Failed to update Kobo database for book:", book_id, "percent:", percent_read)
-
-        return success
+        logger.warn("KoboPlugin: Failed to update Kobo database for book:", book_id, "error:", err)
+        return false
     end
 
     logger.dbg(
